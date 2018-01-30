@@ -417,112 +417,112 @@ pub fn setup_forwarder<S, F1, F2>(
         .parse::<IpHeader>()
         .parse::<TcpHeader>()
         .group_by(3, 
-        	box move |p| {
+            box move |p| {
 
-			struct HeaderState<'a> {
-				mac: &'a mut MacHeader,
-				ip: &'a mut IpHeader,
-				tcp: &'a mut TcpHeader,
-				//flow: Flow,
-			}
-			
-			impl<'a> HeaderState<'a> {
-				fn set_server_socket(&mut self, ip: u32, port: u16) {
-					self.ip.set_dst(ip);
-					self.tcp.set_dst_port(port);
-				}
-			}
-			
-			fn do_ttl(h: &mut HeaderState) {
-				let ttl = h.ip.ttl();
+            struct HeaderState<'a> {
+                mac: &'a mut MacHeader,
+                ip: &'a mut IpHeader,
+                tcp: &'a mut TcpHeader,
+                //flow: Flow,
+            }
+            
+            impl<'a> HeaderState<'a> {
+                fn set_server_socket(&mut self, ip: u32, port: u16) {
+                    self.ip.set_dst(ip);
+                    self.tcp.set_dst_port(port);
+                }
+            }
+            
+            fn do_ttl(h: &mut HeaderState) {
+                let ttl = h.ip.ttl();
                 if ttl >= 1 {
                     h.ip.set_ttl(ttl - 1);
                 }
                 h.ip.update_checksum();
-			}
-			
-			fn make_reply_packet(h: &mut HeaderState,) {
-		        let smac = h.mac.src;
-		        let dmac = h.mac.dst;
-				let sip = h.ip.src();
-				let dip = h.ip.dst();
-				let sport = h.tcp.src_port();
-				let dport = h.tcp.dst_port();
-		        h.mac.set_smac(&dmac);
-		        h.mac.set_dmac(&smac);
-		        h.ip.set_dst(sip);
-		        h.ip.set_src(dip);
-	            h.tcp.set_src_port(dport);
-	            h.tcp.set_dst_port(sport);
-				h.tcp.set_ack_flag();
-				let ack_num=h.tcp.seq_num().wrapping_add(1);
-				h.tcp.set_ack_num(ack_num);
-			}
+            }
+            
+            fn make_reply_packet(h: &mut HeaderState,) {
+                let smac = h.mac.src;
+                let dmac = h.mac.dst;
+                let sip = h.ip.src();
+                let dip = h.ip.dst();
+                let sport = h.tcp.src_port();
+                let dport = h.tcp.dst_port();
+                h.mac.set_smac(&dmac);
+                h.mac.set_dmac(&smac);
+                h.ip.set_dst(sip);
+                h.ip.set_src(dip);
+                h.tcp.set_src_port(dport);
+                h.tcp.set_dst_port(sport);
+                h.tcp.set_ack_flag();
+                let ack_num=h.tcp.seq_num().wrapping_add(1);
+                h.tcp.set_ack_num(ack_num);
+            }
 
-			// remove tcp options for SYN and SYN-ACK, 
-			// pre-requisite: no payload exists, because any payload is not shifted up			
-			fn remove_tcp_options<M: Sized+ Send>(
-				p: &mut Packet<TcpHeader,M>, 
-				h: &mut HeaderState, 
-			) {
-				let old_offset = h.tcp.offset() as u16;
-				if old_offset > 20 {
-					debug!("trimming tcp-options by { } bytes", old_offset-20);
-					h.tcp.set_data_offset(5u8);
-					h.ip.trim_length_by(old_offset-20u16);	// minimum mbuf data length is 60 bytes
-					let trim_by= min(p.data_len()- 60usize, (old_offset - 20u16) as usize);			
-					p.trim_payload_size(trim_by);
-					h.ip.update_checksum();
-				}
-			}
+            // remove tcp options for SYN and SYN-ACK, 
+            // pre-requisite: no payload exists, because any payload is not shifted up            
+            fn remove_tcp_options<M: Sized+ Send>(
+                p: &mut Packet<TcpHeader,M>, 
+                h: &mut HeaderState, 
+            ) {
+                let old_offset = h.tcp.offset() as u16;
+                if old_offset > 20 {
+                    debug!("trimming tcp-options by { } bytes", old_offset-20);
+                    h.tcp.set_data_offset(5u8);
+                    h.ip.trim_length_by(old_offset-20u16);    // minimum mbuf data length is 60 bytes
+                    let trim_by= min(p.data_len()- 60usize, (old_offset - 20u16) as usize);            
+                    p.trim_payload_size(trim_by);
+                    h.ip.update_checksum();
+                }
+            }
 
-		    fn client_syn_received<M: Sized+ Send> (
-		    	p: &mut Packet<TcpHeader,M>, 
-		    	c: &mut Connection, 
-		    	h: &mut HeaderState, ) 
-		    {
-		        c.client_mac = h.mac.clone();
+            fn client_syn_received<M: Sized+ Send> (
+                p: &mut Packet<TcpHeader,M>, 
+                c: &mut Connection, 
+                h: &mut HeaderState, ) 
+            {
+                c.client_mac = h.mac.clone();
                 c.client_sock=SocketAddrV4::new(Ipv4Addr::from(h.ip.src()), h.tcp.src_port());
-		        // debug!("checksum in = {:X}",p.get_header().checksum());
-		        remove_tcp_options(p, h);
-		        make_reply_packet(h);     
-				//generate seq number:
-				c.c_seqn=rand::random::<u32>();
-				h.tcp.set_seq_num(c.c_seqn);
-				update_tcp_checksum(p, h.ip.payload_size(0), h.ip.src(), h.ip.dst());
-		        // debug!("checksum recalc = {:X}",p.get_header().checksum());
-		        debug!("reply with (SYN-)ACK, L3: { }, L4: { }", h.ip, h.tcp);	
-		    }
-		    
-		    fn set_proxy2server_headers(
-		    	c: &mut Connection, 
-		    	h: &mut HeaderState,
-		    	pd: &L234Data, 
-		    ){
-		    	h.mac.set_dmac(&c.server.as_ref().unwrap().mac);
-				h.mac.set_smac(&pd.mac);
-				let l2l3=&c.server.as_ref().unwrap();
+                // debug!("checksum in = {:X}",p.get_header().checksum());
+                remove_tcp_options(p, h);
+                make_reply_packet(h);     
+                //generate seq number:
+                c.c_seqn=rand::random::<u32>();
+                h.tcp.set_seq_num(c.c_seqn);
+                update_tcp_checksum(p, h.ip.payload_size(0), h.ip.src(), h.ip.dst());
+                // debug!("checksum recalc = {:X}",p.get_header().checksum());
+                debug!("reply with (SYN-)ACK, L3: { }, L4: { }", h.ip, h.tcp);    
+            }
+            
+            fn set_proxy2server_headers(
+                c: &mut Connection, 
+                h: &mut HeaderState,
+                pd: &L234Data, 
+            ){
+                h.mac.set_dmac(&c.server.as_ref().unwrap().mac);
+                h.mac.set_smac(&pd.mac);
+                let l2l3=&c.server.as_ref().unwrap();
                 h.set_server_socket(l2l3.ip, l2l3.port);
                 h.ip.set_src(pd.ip);
-                h.tcp.set_src_port(c.proxy_sport);	    	
-		    }
-		    /*
-		    extern "C" {
-		    	pub fn process_payload(p_payload: *mut u8, size: usize, free_size: usize) -> usize;
-		    }
-		    */
-		    fn client_to_server<M: Sized+ Send, F>(
-		    	p: &mut Packet<TcpHeader,M>, 
-		    	c: &mut Connection, 
-		    	h: &mut HeaderState, 
-		    	pd: &L234Data,
-		    	f_process_payload: F,     	
-		    )
-		    where F: Fn(&mut Connection, &mut [u8], usize)
-		    {
-			    let tailroom=p.get_tailroom();
-		    	f_process_payload(c, p.get_mut_payload(), tailroom);
-		    	let ip_client=h.ip.src();	
+                h.tcp.set_src_port(c.proxy_sport);            
+            }
+            /*
+            extern "C" {
+                pub fn process_payload(p_payload: *mut u8, size: usize, free_size: usize) -> usize;
+            }
+            */
+            fn client_to_server<M: Sized+ Send, F>(
+                p: &mut Packet<TcpHeader,M>, 
+                c: &mut Connection, 
+                h: &mut HeaderState, 
+                pd: &L234Data,
+                f_process_payload: F,         
+            )
+            where F: Fn(&mut Connection, &mut [u8], usize)
+            {
+                let tailroom=p.get_tailroom();
+                f_process_payload(c, p.get_mut_payload(), tailroom);
+                let ip_client=h.ip.src();    
                 let port_client = h.tcp.src_port();
                 set_proxy2server_headers(c,h,pd);
                 h.tcp.update_checksum_incremental(port_client, c.proxy_sport);
@@ -532,183 +532,183 @@ pub fn setup_forwarder<S, F1, F2>(
                     !finalize_checksum(c.server.as_ref().unwrap().ip),
                 );
                 // adapt ackn of client packet
-				let oldackn=h.tcp.ack_num();
-				let newackn=oldackn.wrapping_sub(c.c_seqn);
-				let oldseqn=h.tcp.seq_num();
-	            let newseqn=oldseqn.wrapping_add(c.c2s_inserted_bytes as u32);
-	            if c.c2s_inserted_bytes!=0 {
-     	            h.tcp.set_seq_num(newseqn);
-		            h.tcp.update_checksum_incremental(
-		                !finalize_checksum(oldseqn),
-		                !finalize_checksum(newseqn),
-		            );
-	            }
-				h.tcp.set_ack_num(newackn);
-				h.tcp.update_checksum_incremental(
-					!finalize_checksum(oldackn),
-					!finalize_checksum(newackn),
-				);
-                //debug!("translated c->s: { }, L4: { }", p, p.get_header());		    	
-		    }
-		    
-			fn server_to_client<M: Sized+ Send>(
-		    	p: &mut Packet<TcpHeader,M>, 
-		    	c: &mut Connection, 
-		    	h: &mut HeaderState, 
-		    	pd: &L234Data,			
-			) {
-				// this is the s->c part of the stable two-way connection state
-	        	// translate packets and forward to client
-	            h.mac.set_dmac(&c.client_mac.src);
-	            h.mac.set_smac(&pd.mac);
-	            let ip_server=h.ip.src();     
-	            h.ip.set_dst(u32::from(*c.client_sock.ip()));
-	            h.ip.set_src(pd.ip);
-	            let server_src_port = h.tcp.src_port();
-	            h.tcp.set_src_port(pd.port);
-	            h.tcp.set_dst_port(c.client_sock.port());
-	            h.tcp.update_checksum_incremental(server_src_port, pd.port);
-	            h.tcp.update_checksum_incremental(c.proxy_sport, c.client_sock.port());
-	            h.tcp.update_checksum_incremental(
-	                !finalize_checksum(ip_server),
-	                !finalize_checksum(u32::from(*c.client_sock.ip())),
-	            );
-	            // adapt seqn and ackn from server packet
-	            let oldseqn=h.tcp.seq_num();
-	            let newseqn=oldseqn.wrapping_add(c.c_seqn);
-	            let oldackn=h.tcp.ack_num();
-	            let newackn=oldackn.wrapping_sub(c.c2s_inserted_bytes as u32);
-	            if c.c2s_inserted_bytes!=0 {
-     	            h.tcp.set_ack_num(newackn);
-		            h.tcp.update_checksum_incremental(
-	                !finalize_checksum(oldackn),
-	                !finalize_checksum(newackn),
-	            );
-	
-	            }
-	            h.tcp.set_seq_num(newseqn);
-	            h.tcp.update_checksum_incremental(
-	                !finalize_checksum(oldseqn),
-	                !finalize_checksum(newseqn),
-	            );
-	            //debug!("translated s->c: {}", p);				
-			}
-			
-		    fn select_server<M: Sized+ Send, F>(
-		    	p: &mut Packet<TcpHeader,M>, 
-		    	c: &mut Connection, 
-		    	h: &mut HeaderState, 
-		    	pd: &L234Data,
-		    	f_select_server: &F,
-		    )
-		    where F: Fn(&mut Connection),
-		    {
-		    	{
-			    	// safe the payload for later
-			    	p.copy_payload_to_bytearray(&mut c.payload);
-			    	let old_payload_size=c.payload.len();
-			    	f_select_server(c);
-			    	c.c2s_inserted_bytes=c.payload.len()-old_payload_size;
-		    	}
-		    	// create a SYN Packet from the current packet
-		    	// remove payload
-		    	let sz=p.payload_size();
-		    	h.ip.trim_length_by(sz as u16);
-		    	// 60 is the minimum data length (4 bytes FCS not included)
-		    	let trim_by= min(p.data_len()- 60usize, sz as usize);
-		    	p.trim_payload_size(trim_by);
-		    	c.f_seqn=h.tcp.seq_num().wrapping_sub(1);
-		    	set_proxy2server_headers(c, h, pd);
-		    	h.tcp.set_seq_num(c.f_seqn);
-		    	h.tcp.set_syn_flag();
-		    	h.tcp.set_ack_num(0u32);
-		    	h.tcp.unset_ack_flag();
-		    	h.tcp.unset_psh_flag();
-		    	update_tcp_checksum(p, h.ip.payload_size(0), h.ip.src(), h.ip.dst());
-		    	debug!("new SYN packet L2: {}, L3: {}, L4: {}", h.mac, h.ip, p.get_header());
-		    }
-		    
+                let oldackn=h.tcp.ack_num();
+                let newackn=oldackn.wrapping_sub(c.c_seqn);
+                let oldseqn=h.tcp.seq_num();
+                let newseqn=oldseqn.wrapping_add(c.c2s_inserted_bytes as u32);
+                if c.c2s_inserted_bytes!=0 {
+                     h.tcp.set_seq_num(newseqn);
+                    h.tcp.update_checksum_incremental(
+                        !finalize_checksum(oldseqn),
+                        !finalize_checksum(newseqn),
+                    );
+                }
+                h.tcp.set_ack_num(newackn);
+                h.tcp.update_checksum_incremental(
+                    !finalize_checksum(oldackn),
+                    !finalize_checksum(newackn),
+                );
+                //debug!("translated c->s: { }, L4: { }", p, p.get_header());                
+            }
+            
+            fn server_to_client<M: Sized+ Send>(
+                p: &mut Packet<TcpHeader,M>, 
+                c: &mut Connection, 
+                h: &mut HeaderState, 
+                pd: &L234Data,            
+            ) {
+                // this is the s->c part of the stable two-way connection state
+                // translate packets and forward to client
+                h.mac.set_dmac(&c.client_mac.src);
+                h.mac.set_smac(&pd.mac);
+                let ip_server=h.ip.src();     
+                h.ip.set_dst(u32::from(*c.client_sock.ip()));
+                h.ip.set_src(pd.ip);
+                let server_src_port = h.tcp.src_port();
+                h.tcp.set_src_port(pd.port);
+                h.tcp.set_dst_port(c.client_sock.port());
+                h.tcp.update_checksum_incremental(server_src_port, pd.port);
+                h.tcp.update_checksum_incremental(c.proxy_sport, c.client_sock.port());
+                h.tcp.update_checksum_incremental(
+                    !finalize_checksum(ip_server),
+                    !finalize_checksum(u32::from(*c.client_sock.ip())),
+                );
+                // adapt seqn and ackn from server packet
+                let oldseqn=h.tcp.seq_num();
+                let newseqn=oldseqn.wrapping_add(c.c_seqn);
+                let oldackn=h.tcp.ack_num();
+                let newackn=oldackn.wrapping_sub(c.c2s_inserted_bytes as u32);
+                if c.c2s_inserted_bytes!=0 {
+                     h.tcp.set_ack_num(newackn);
+                    h.tcp.update_checksum_incremental(
+                    !finalize_checksum(oldackn),
+                    !finalize_checksum(newackn),
+                );
+    
+                }
+                h.tcp.set_seq_num(newseqn);
+                h.tcp.update_checksum_incremental(
+                    !finalize_checksum(oldseqn),
+                    !finalize_checksum(newseqn),
+                );
+                //debug!("translated s->c: {}", p);                
+            }
+            
+            fn select_server<M: Sized+ Send, F>(
+                p: &mut Packet<TcpHeader,M>, 
+                c: &mut Connection, 
+                h: &mut HeaderState, 
+                pd: &L234Data,
+                f_select_server: &F,
+            )
+            where F: Fn(&mut Connection),
+            {
+                {
+                    // safe the payload for later
+                    p.copy_payload_to_bytearray(&mut c.payload);
+                    let old_payload_size=c.payload.len();
+                    f_select_server(c);
+                    c.c2s_inserted_bytes=c.payload.len()-old_payload_size;
+                }
+                // create a SYN Packet from the current packet
+                // remove payload
+                let sz=p.payload_size();
+                h.ip.trim_length_by(sz as u16);
+                // 60 is the minimum data length (4 bytes FCS not included)
+                let trim_by= min(p.data_len()- 60usize, sz as usize);
+                p.trim_payload_size(trim_by);
+                c.f_seqn=h.tcp.seq_num().wrapping_sub(1);
+                set_proxy2server_headers(c, h, pd);
+                h.tcp.set_seq_num(c.f_seqn);
+                h.tcp.set_syn_flag();
+                h.tcp.set_ack_num(0u32);
+                h.tcp.unset_ack_flag();
+                h.tcp.unset_psh_flag();
+                update_tcp_checksum(p, h.ip.payload_size(0), h.ip.src(), h.ip.dst());
+                debug!("new SYN packet L2: {}, L3: {}, L4: {}", h.mac, h.ip, p.get_header());
+            }
+            
    
-		    fn server_synack_received<M: Sized+ Send>(
-		    	p: &mut Packet<TcpHeader,M>,
-		    	c: &mut Connection, 
-		    	h: &mut HeaderState, 
-		    	producer: &mut MpscProducer,   	
-		    ){
-		    	let delta=c.c_seqn.wrapping_sub(h.tcp.seq_num()); // correction for server side seq numbers
-		    	c.c_seqn=delta;
-		    	make_reply_packet(h);
-		    	h.tcp.unset_syn_flag();
-		    	c.f_seqn=c.f_seqn.wrapping_add(1);
-		    	h.tcp.set_seq_num(c.f_seqn);
-		    	//debug!("data_len= { }, p= { }",p.data_len(), p);
-				update_tcp_checksum(p, h.ip.payload_size(0), h.ip.src(), h.ip.dst());
-				// we clone the packet and send it via the extra queue 
-				// before the delayed request
-				// to keep them in sequence
-				let p_clone=p.clone();
-    	    	//debug!("new ACK packet L2: {}, L3: {}, L4: {}", h.mac, h.ip, p_clone.get_header());
-			    producer.enqueue_one(p_clone);
+            fn server_synack_received<M: Sized+ Send>(
+                p: &mut Packet<TcpHeader,M>,
+                c: &mut Connection, 
+                h: &mut HeaderState, 
+                producer: &mut MpscProducer,       
+            ){
+                let delta=c.c_seqn.wrapping_sub(h.tcp.seq_num()); // correction for server side seq numbers
+                c.c_seqn=delta;
+                make_reply_packet(h);
+                h.tcp.unset_syn_flag();
+                c.f_seqn=c.f_seqn.wrapping_add(1);
+                h.tcp.set_seq_num(c.f_seqn);
+                //debug!("data_len= { }, p= { }",p.data_len(), p);
+                update_tcp_checksum(p, h.ip.payload_size(0), h.ip.src(), h.ip.dst());
+                // we clone the packet and send it via the extra queue 
+                // before the delayed request
+                // to keep them in sequence
+                let p_clone=p.clone();
+                //debug!("new ACK packet L2: {}, L3: {}, L4: {}", h.mac, h.ip, p_clone.get_header());
+                producer.enqueue_one(p_clone);
 
-    	    	if c.payload.len() > 0 {
-	    	    	let mut delayed_ip=new_packet().unwrap() //TODO handle None == out of memory
-				    	.push_header(h.mac)
-				    	.unwrap()
-				    	.push_header(h.ip)
-				    	.unwrap();
-				    delayed_ip.get_mut_header().set_length(
-				    	h.ip.length() +c.payload.len() as u16);
-				    delayed_ip.get_mut_header().update_checksum();
-				    //debug!("stored payload.len()= {}, h.ip.length= {}", c.payload.len(), h.ip.length()); 
-				    
-				    let ip_payload_size= delayed_ip.get_header().payload_size(0);
-				    //debug!("ip_payload_size= {}", ip_payload_size);
-				    let mut delayed_p=delayed_ip
-				    	.push_header(h.tcp)
-				    	.unwrap();
-				    delayed_p.copy_payload_from_bytearray(&c.payload);	
-				    { 
-				    	let h_tcp=delayed_p.get_mut_header();
-				    	h_tcp.set_psh_flag();    	
-				    }
-				    // let sz=delayed_p.payload_size() as u32;
-				    // delayed_p.get_mut_header().set_seq_num(c.f_seqn+sz);
-			    	update_tcp_checksum(
-			    		&mut delayed_p,
-			    		ip_payload_size,
-			    		h.ip.src(),
-			    		h.ip.dst(),
-			    	);
-			    	//debug!("delayed packet: { }", delayed_p);
-			    	producer.enqueue_one(delayed_p);
-    	    	}		    		    	
-		    }
+                if c.payload.len() > 0 {
+                    let mut delayed_ip=new_packet().unwrap() //TODO handle None == out of memory
+                        .push_header(h.mac)
+                        .unwrap()
+                        .push_header(h.ip)
+                        .unwrap();
+                    delayed_ip.get_mut_header().set_length(
+                        h.ip.length() +c.payload.len() as u16);
+                    delayed_ip.get_mut_header().update_checksum();
+                    //debug!("stored payload.len()= {}, h.ip.length= {}", c.payload.len(), h.ip.length()); 
+                    
+                    let ip_payload_size= delayed_ip.get_header().payload_size(0);
+                    //debug!("ip_payload_size= {}", ip_payload_size);
+                    let mut delayed_p=delayed_ip
+                        .push_header(h.tcp)
+                        .unwrap();
+                    delayed_p.copy_payload_from_bytearray(&c.payload);    
+                    { 
+                        let h_tcp=delayed_p.get_mut_header();
+                        h_tcp.set_psh_flag();        
+                    }
+                    // let sz=delayed_p.payload_size() as u32;
+                    // delayed_p.get_mut_header().set_seq_num(c.f_seqn+sz);
+                    update_tcp_checksum(
+                        &mut delayed_p,
+                        ip_payload_size,
+                        h.ip.src(),
+                        h.ip.dst(),
+                    );
+                    //debug!("delayed packet: { }", delayed_p);
+                    producer.enqueue_one(delayed_p);
+                }                            
+            }
 
             let mut group_index=0usize;  // the index of the group to be returned
             let mut producer=producer.clone(); // need to clone here, as this closure is an FnMut
 
             assert!(p.get_pre_header().is_some()); // we must have parsed the headers
             
-        	let hs_ip;
+            let hs_ip;
             let hs_flow;
-        	let hs_mac;
-        	let hs_tcp;
+            let hs_mac;
+            let hs_tcp;
 
             unsafe {
                 // converting to raw pointer avoids to borrow mutably from p
-            	let ptr = p.get_mut_pre_header().unwrap() as *mut IpHeader;
+                let ptr = p.get_mut_pre_header().unwrap() as *mut IpHeader;
                 hs_ip = &mut *ptr; 
                 hs_flow = hs_ip.flow().unwrap();
-            	let ptr = p.get_mut_pre_pre_header().unwrap() as *mut MacHeader;               
+                let ptr = p.get_mut_pre_pre_header().unwrap() as *mut MacHeader;               
                 hs_mac=&mut *ptr;
                 let ptr=p.get_mut_header() as *mut TcpHeader;
                 hs_tcp = &mut *ptr;
             };
             
             let mut hs = HeaderState {
-            	mac: hs_mac,
-            	ip: hs_ip,
-            	tcp: hs_tcp,
+                mac: hs_mac,
+                ip: hs_ip,
+                tcp: hs_tcp,
             };
             // if this port is set by the following tcp state machine, the port/connection becomes released afterwards
             let mut release_proxy_sport = None;
@@ -720,119 +720,119 @@ pub fn setup_forwarder<S, F1, F2>(
                 // we reset server and client state 
                 //TODO revisit this approach
                 if hs.tcp.syn_flag() { 
-                	c.c_state=TcpState::SynSent;
-                	c.s_state=TcpState::Listen;
-                	client_syn_received(p, &mut c, &mut hs); // replies with a SYN-ACK to client
-                	group_index=1;                                        
+                    c.c_state=TcpState::SynSent;
+                    c.s_state=TcpState::Listen;
+                    client_syn_received(p, &mut c, &mut hs); // replies with a SYN-ACK to client
+                    group_index=1;                                        
                 } 
-				else if hs.tcp.ack_flag() && c.c_state == TcpState::SynSent {
-					c.c_state=TcpState::Established;
-					debug!("client socket established for s-port: { }", c.proxy_sport);
-				}
-				else if hs.tcp.fin_flag() {
-					if c.c_state == TcpState::CloseWait {
-						if hs.tcp.ack_flag() {
-							// we got a FIN-ACK as a receipt to a sent FIN (server closed connection)
-  			                    debug!("received FIN-ACK on port {}", hs.tcp.src_port());
-							c.c_state == TcpState::LastAck;
-							c.s_state == TcpState::Closed;
-						}							
-					} else {
-						// client closes connection
-						// we dont care about its state
-						debug!("client closes connection on port {}/{} in state {:?}",
-							hs.tcp.src_port(), c.proxy_sport, c.c_state,
-						);
-						c.c_state= TcpState::FinWait;
-						c.s_state= TcpState::CloseWait;
-					}
-					if c.server.is_some() {
-						client_to_server(p, &mut c, &mut hs, &pd, &f_process_payload_c_s);
-						group_index=1; 				
-					}
-					else { group_index=0; }
-				}
-				else if c.c_state == TcpState::Established {
-					if c.s_state == TcpState::Listen {
-						debug!("selecting server after 3 way handshake");
-						select_server(p, &mut c, &mut hs, &pd, &f_select_server);
-						c.s_state= TcpState::SynReceived;
-						group_index= 1;
-					} else if c.s_state == TcpState::Established {
-						// this is the c->s part of the stable two-way connection state
-						client_to_server(p, &mut c, &mut hs, &pd, &f_process_payload_c_s);
-						group_index= 1;
-					}
-				} else if c.c_state==TcpState::Closed && hs.tcp.ack_flag() {
-                	// received final ack from client for client initiated close
-                	debug!("received final ACK for client initiated close on port {}/{}",
-                		hs.tcp.src_port(), c.proxy_sport,
-                	);
-                	c.s_state= TcpState::Listen;
-                	c.c_state= TcpState::Listen;
-                	// release connection in the next block after the state machine
-	                release_proxy_sport=Some(c.proxy_sport);
-                	client_to_server(p, &mut c, &mut hs, &pd, &f_process_payload_c_s);
-		            group_index=1;
-				} 
-				else {
-					debug!("unexpected client-side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
-						hs.tcp.src_port(), c.proxy_sport, c.c_state, c.s_state,
-					);
-					group_index= 2;
-				}               
+                else if hs.tcp.ack_flag() && c.c_state == TcpState::SynSent {
+                    c.c_state=TcpState::Established;
+                    debug!("client socket established for s-port: { }", c.proxy_sport);
+                }
+                else if hs.tcp.fin_flag() {
+                    if c.c_state == TcpState::CloseWait {
+                        if hs.tcp.ack_flag() {
+                            // we got a FIN-ACK as a receipt to a sent FIN (server closed connection)
+                                  debug!("received FIN-ACK on port {}", hs.tcp.src_port());
+                            c.c_state == TcpState::LastAck;
+                            c.s_state == TcpState::Closed;
+                        }                            
+                    } else {
+                        // client closes connection
+                        // we dont care about its state
+                        debug!("client closes connection on port {}/{} in state {:?}",
+                            hs.tcp.src_port(), c.proxy_sport, c.c_state,
+                        );
+                        c.c_state= TcpState::FinWait;
+                        c.s_state= TcpState::CloseWait;
+                    }
+                    if c.server.is_some() {
+                        client_to_server(p, &mut c, &mut hs, &pd, &f_process_payload_c_s);
+                        group_index=1;                 
+                    }
+                    else { group_index=0; }
+                }
+                else if c.c_state == TcpState::Established {
+                    if c.s_state == TcpState::Listen {
+                        debug!("selecting server after 3 way handshake");
+                        select_server(p, &mut c, &mut hs, &pd, &f_select_server);
+                        c.s_state= TcpState::SynReceived;
+                        group_index= 1;
+                    } else if c.s_state == TcpState::Established {
+                        // this is the c->s part of the stable two-way connection state
+                        client_to_server(p, &mut c, &mut hs, &pd, &f_process_payload_c_s);
+                        group_index= 1;
+                    }
+                } else if c.c_state==TcpState::Closed && hs.tcp.ack_flag() {
+                    // received final ack from client for client initiated close
+                    debug!("received final ACK for client initiated close on port {}/{}",
+                        hs.tcp.src_port(), c.proxy_sport,
+                    );
+                    c.s_state= TcpState::Listen;
+                    c.c_state= TcpState::Listen;
+                    // release connection in the next block after the state machine
+                    release_proxy_sport=Some(c.proxy_sport);
+                    client_to_server(p, &mut c, &mut hs, &pd, &f_process_payload_c_s);
+                    group_index=1;
+                } 
+                else {
+                    debug!("unexpected client-side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
+                        hs.tcp.src_port(), c.proxy_sport, c.c_state, c.s_state,
+                    );
+                    group_index= 2;
+                }               
             } else {
                 // should be server to client
                 { 
-                   	let mut c = sm.get_mut(CKey::Port(hs.tcp.dst_port()));
+                       let mut c = sm.get_mut(CKey::Port(hs.tcp.dst_port()));
                     if c.is_some() {
-                    	// debug!("proxy port has state");
+                        // debug!("proxy port has state");
                         let mut c = c.as_mut().unwrap();
                         if c.s_state == TcpState::SynReceived && hs.tcp.ack_flag() && hs.tcp.syn_flag() {
-                        	c.s_state= TcpState::Established;
-                        	debug!("established two-way client server connection");
-                        	server_synack_received(p, &mut c, &mut hs, &mut producer);
-                        	group_index=0;  // packets are sent via extra queue
+                            c.s_state= TcpState::Established;
+                            debug!("established two-way client server connection");
+                            server_synack_received(p, &mut c, &mut hs, &mut producer);
+                            group_index=0;  // packets are sent via extra queue
                         }
                         else if hs.tcp.fin_flag() {
-                        	if c.s_state == TcpState::CloseWait  {
-                        		if hs.tcp.ack_flag() { // FIN+ACK
-	                        		// got FIN receipt to a client initiated FIN 
-	                        		debug!("received FIN-ACK on port {}", hs.tcp.dst_port());
-	                        		c.s_state = TcpState::LastAck;
-	                        		c.c_state = TcpState::Closed;
-                        		} 
-                        	}
-                        	else { // server initiated TCP close
-                        		debug!("server closes connection on port {}/{} in state {:?}",
-									hs.tcp.dst_port(), c.client_sock.port(), c.s_state,
-								); 
-                        		c.s_state = TcpState::FinWait;
-                        		c.c_state = TcpState::CloseWait; 
-                        	}
-                        	server_to_client(p, &mut c, &mut hs, &pd);
-                        	group_index=1;                        	
+                            if c.s_state == TcpState::CloseWait  {
+                                if hs.tcp.ack_flag() { // FIN+ACK
+                                    // got FIN receipt to a client initiated FIN 
+                                    debug!("received FIN-ACK on port {}", hs.tcp.dst_port());
+                                    c.s_state = TcpState::LastAck;
+                                    c.c_state = TcpState::Closed;
+                                } 
+                            }
+                            else { // server initiated TCP close
+                                debug!("server closes connection on port {}/{} in state {:?}",
+                                    hs.tcp.dst_port(), c.client_sock.port(), c.s_state,
+                                ); 
+                                c.s_state = TcpState::FinWait;
+                                c.c_state = TcpState::CloseWait; 
+                            }
+                            server_to_client(p, &mut c, &mut hs, &pd);
+                            group_index=1;                            
                         }
-                        else if c.s_state == TcpState::Established && c.c_state == TcpState::Established {			            
-							// this is the s->c part of the stable two-way connection state
-                        	// translate packets and forward to client
-							server_to_client(p, &mut c, &mut hs, &pd);
-				            group_index=1; 
+                        else if c.s_state == TcpState::Established && c.c_state == TcpState::Established {                        
+                            // this is the s->c part of the stable two-way connection state
+                            // translate packets and forward to client
+                            server_to_client(p, &mut c, &mut hs, &pd);
+                            group_index=1; 
                         } else if c.s_state==TcpState::Closed && hs.tcp.ack_flag() {
-                        	// received final ack from server for server initiated close
-                        	debug!("received final ACK for server initiated close on port { }", hs.tcp.dst_port());
-                        	c.s_state= TcpState::Listen;
-                        	c.c_state= TcpState::Listen;
-                        	// release connection in the next block
-	                        release_proxy_sport=Some(c.proxy_sport);
-                        	server_to_client(p, &mut c, &mut hs, &pd);
-				            group_index=1; 
+                            // received final ack from server for server initiated close
+                            debug!("received final ACK for server initiated close on port { }", hs.tcp.dst_port());
+                            c.s_state= TcpState::Listen;
+                            c.c_state= TcpState::Listen;
+                            // release connection in the next block
+                            release_proxy_sport=Some(c.proxy_sport);
+                            server_to_client(p, &mut c, &mut hs, &pd);
+                            group_index=1; 
                         } else {
-							debug!("unexpected server side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
-								hs.tcp.dst_port(), c.client_sock.port(), c.c_state, c.s_state,
-							);
-							group_index= 2;
-						}                               
+                            debug!("unexpected server side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
+                                hs.tcp.dst_port(), c.client_sock.port(), c.c_state, c.s_state,
+                            );
+                            group_index= 2;
+                        }                               
                     } else {
                         debug!("proxy port has no state, sending to KNI i/f");
                         // we send this to KNI which handles out-of-order TCP, e.g. by sending RST
@@ -843,11 +843,11 @@ pub fn setup_forwarder<S, F1, F2>(
             // here we check if we shall release the connection state,
             // required because of borrow checker for the state manager sm
             if let Some(release_proxy_sport) = release_proxy_sport {
-             	debug!("releasing port {}", release_proxy_sport);
-                sm.release_port(release_proxy_sport);	                    	
+                 debug!("releasing port {}", release_proxy_sport);
+                sm.release_port(release_proxy_sport);                            
             }
             do_ttl(&mut hs);           
-			group_index
+            group_index
         }, sched);
 
 

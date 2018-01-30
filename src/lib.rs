@@ -112,12 +112,12 @@ mod tests {
         let mut pci: Option<&CacheAligned<PortQueue>> = None;
         for port in &ports {
             debug!(
-	            "setup_pipelines: port {} --  {} rxq {} txq {}",
-	            port.port.name(),
-	            port.port.mac_address(),
-	            port.rxq(),
-	            port.txq(),
-	        );
+                "setup_pipelines: port {} --  {} rxq {} txq {}",
+                port.port.name(),
+                port.port.mac_address(),
+                port.rxq(),
+                port.txq(),
+            );
             if port.port.is_kni() {
                 kni = Some(port);
                 debug!("is kni port!");
@@ -183,18 +183,18 @@ mod tests {
                     .unwrap();
                 userdata.c2s_count += payload.len();
                 debug!(
-	                "c->s (tailroom { }, {:?}): {:?}",
-	                tailroom,
-	                userdata,
-	                c_tag,
-	            );
+                    "c->s (tailroom { }, {:?}): {:?}",
+                    tailroom,
+                    userdata,
+                    c_tag,
+                );
             }
             
-	    	unsafe {
-		    	let payload_sz = payload.len(); }
-		    	let p_payload= payload[0] as *mut u8;
-		    	process_payload(p_payload, payload_sz, tailroom); 
-	    	} */
+            unsafe {
+                let payload_sz = payload.len(); }
+                let p_payload= payload[0] as *mut u8;
+                process_payload(p_payload, payload_sz, tailroom); 
+            } */
         };
 
 
@@ -206,8 +206,8 @@ mod tests {
             proxy_data,
             f_select_server,
             f_process_payload_c_s,
-	//        u32::from(CLIENT_IP.parse::<Ipv4Addr>().unwrap()),
-	//        MacAddress::parse_str(CLIENT_MAC).unwrap(),
+    //        u32::from(CLIENT_IP.parse::<Ipv4Addr>().unwrap()),
+    //        MacAddress::parse_str(CLIENT_MAC).unwrap(),
         );
     }
 
@@ -330,7 +330,7 @@ mod tests {
                         }
                     }
                 }
-                info!("terminating Opticur ...");
+                info!("terminating ProxyEngine ...");
                 std::process::exit(0);
             }
             Err(ref e) => {
