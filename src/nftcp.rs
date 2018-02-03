@@ -86,7 +86,7 @@ pub struct Connection {
     c_state: TcpState,
     s_state: TcpState,
     /// c_seqn is seqn for connection to client,
-    /// after the SYN-ACK from ldap server it is the delta to be added to server seqn
+    /// after the SYN-ACK from the target server it is the delta to be added to server seqn
     /// see 'server_synack_received'
     c_seqn: u32,
     /// number of bytes inserted by proxy in connection from client to server
@@ -216,7 +216,7 @@ impl ConnectionManager {
                     if let Some(c) = self.port2con.get_mut(&port) {
                         assert!(c.proxy_sport == 0);
                         c.initialize(s, port);
-                        debug!("ldap flow for {} created on port {:?}", s, port);
+                        debug!("tcp flow for {} created on port {:?}", s, port);
                         self.sock2port.insert(c.client_sock, port);
 
                     } else {
@@ -229,7 +229,7 @@ impl ConnectionManager {
                         c.initialize(s, port);
                         self.sock2port.insert(c.client_sock, port);
                         self.port2con.insert(port, c);
-                        debug!("ldap flow for {} created on port {:?}", s, port);
+                        debug!("tcp flow for {} created on port {:?}", s, port);
                     }
                     self.port2con.get_mut(&port)
                 } else {
@@ -274,7 +274,8 @@ impl Executable for KniHandleRequest {
     }
 }
 
-pub fn setup_kni(kni_name: &str, ip_address: &str, mac_address: &str) {
+pub fn setup_kni(kni_name: &str, ip_address: &str, mac_address: &str, kni_netns: &str) {
+
     debug!("setup_kni");
     //# ip link set dev vEth1 address XX:XX:XX:XX:XX:XX
     let output = Command::new("ip")
@@ -282,6 +283,7 @@ pub fn setup_kni(kni_name: &str, ip_address: &str, mac_address: &str) {
         .output()
         .expect("failed to assign MAC address to kni i/f");
     let reply = output.stderr;
+
     debug!(
         "assigning MAC addr {} to {}: {}, {}",
         mac_address,
@@ -290,9 +292,50 @@ pub fn setup_kni(kni_name: &str, ip_address: &str, mac_address: &str) {
         String::from_utf8_lossy(&reply)
     );
 
-    // e.g. ip addr add w.x.y.z/24 dev vEth1
+    //# ip netns add nskni
     let output = Command::new("ip")
-        .args(&["addr", "add", ip_address, "dev", kni_name])
+        .args(&["netns", "add", kni_netns])
+        .output()
+        .expect("failed to create namespace for kni i/f");
+    let reply = output.stderr;
+
+    debug!(
+        "creating network namespace {}: {}, {}",
+        kni_netns,
+        output.status,
+        String::from_utf8_lossy(&reply)
+    );
+
+    // ip link set dev vEth1 netns nskni
+    let output = Command::new("ip")
+        .args(&["link", "set", "dev", kni_name, "netns", kni_netns])
+        .output()
+        .expect("failed to move kni i/f to namespace");
+    let reply = output.stderr;
+
+    debug!(
+        "moving kni i/f {} to namesapce {}: {}, {}",
+        kni_name,
+        kni_netns,
+        output.status,
+        String::from_utf8_lossy(&reply)
+    );
+
+    // e.g. ip netns exec nskni ip addr add w.x.y.z/24 dev vEth1
+    let output = Command::new("ip")
+        .args(
+            &[
+                "netns",
+                "exec",
+                kni_netns,
+                "ip",
+                "addr",
+                "add",
+                ip_address,
+                "dev",
+                kni_name,
+            ],
+        )
         .output()
         .expect("failed to assign IP address to kni i/f");
     let reply = output.stderr;
@@ -303,21 +346,45 @@ pub fn setup_kni(kni_name: &str, ip_address: &str, mac_address: &str) {
         output.status,
         String::from_utf8_lossy(&reply)
     );
-    // e.g. ip link set dev vEth1 up
+    // e.g. ip netns exec nskni ip link set dev vEth1 up
     let output1 = Command::new("ip")
-        .args(&["link", "set", "dev", kni_name, "up"])
+        .args(
+            &[
+                "netns",
+                "exec",
+                kni_netns,
+                "ip",
+                "link",
+                "set",
+                "dev",
+                kni_name,
+                "up",
+            ],
+        )
         .output()
         .expect("failed to set kni i/f up");
     let reply1 = output1.stderr;
     debug!(
-        "ip link set dev {} up: {}, {}",
+        "ip netns exec {} ip link set dev {} up: {}, {}",
+        kni_netns,
         kni_name,
         output1.status,
         String::from_utf8_lossy(&reply1)
     );
-    // e.g. ip addr show dev vEth1
+    // e.g. ip netns exec nskni ip addr show dev vEth1
     let output2 = Command::new("ip")
-        .args(&["addr", "show", "dev", kni_name])
+        .args(
+            &[
+                "netns",
+                "exec",
+                kni_netns,
+                "ip",
+                "addr",
+                "show",
+                "dev",
+                kni_name,
+            ],
+        )
         .output()
         .expect("failed to show IP address of kni i/f");
     let reply2 = output2.stdout;
@@ -391,10 +458,10 @@ pub fn setup_forwarder<S, F1, F2>(
                 let ipflow = ipflow.unwrap();
                 if ipflow.dst_ip == pd.ip && ipflow.proto == 6 {
                     if ipflow.dst_port == pd.port || ipflow.dst_port >= PROXY_PORT_MIN {
-                        // debug!("proxy ldap flow: {:?}", ipflow);
+                        // debug!("proxy tcp flow: {:?}", ipflow);
                         1
                     } else {
-                        // debug!("no proxy ldap flow: {:?}", ipflow);
+                        // debug!("no proxy tcp flow: {:?}", ipflow);
                         0
                     }
                 } else {
@@ -579,12 +646,11 @@ pub fn setup_forwarder<S, F1, F2>(
                 let oldackn=h.tcp.ack_num();
                 let newackn=oldackn.wrapping_sub(c.c2s_inserted_bytes as u32);
                 if c.c2s_inserted_bytes!=0 {
-                     h.tcp.set_ack_num(newackn);
+                    h.tcp.set_ack_num(newackn);
                     h.tcp.update_checksum_incremental(
-                    !finalize_checksum(oldackn),
-                    !finalize_checksum(newackn),
-                );
-    
+                        !finalize_checksum(oldackn),
+                        !finalize_checksum(newackn),
+                    );
                 }
                 h.tcp.set_seq_num(newseqn);
                 h.tcp.update_checksum_incremental(
@@ -612,10 +678,17 @@ pub fn setup_forwarder<S, F1, F2>(
                 }
                 // create a SYN Packet from the current packet
                 // remove payload
-                let sz=p.payload_size();
-                h.ip.trim_length_by(sz as u16);
+                let payload_sz:u16;
+                { 
+                  let iph=p.get_pre_header().unwrap();
+                  // payload size = ip total length - ip header length -tcp header length
+                  payload_sz=iph.length()-(iph.ihl() as u16)*4u16 - (p.get_header().data_offset() as u16)*4u16;
+                  debug!("select_server: iph.length= {}, tcp data offset= {}, payload_sz= {}", 
+                      iph.length(), p.get_header().data_offset(), payload_sz);
+                  h.ip.trim_length_by(payload_sz as u16);
+                }
                 // 60 is the minimum data length (4 bytes FCS not included)
-                let trim_by= min(p.data_len()- 60usize, sz as usize);
+                let trim_by= min(p.data_len()- 60usize, payload_sz as usize);
                 p.trim_payload_size(trim_by);
                 c.f_seqn=h.tcp.seq_num().wrapping_sub(1);
                 set_proxy2server_headers(c, h, pd);

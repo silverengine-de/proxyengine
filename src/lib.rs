@@ -1,4 +1,5 @@
 #![feature(box_syntax)]
+#![feature(tcpstream_connect_timeout)]
 
 // Logging
 #[macro_use]
@@ -9,7 +10,7 @@ extern crate e2d2;
 extern crate fnv;
 extern crate rand;
 
-mod nftcp;
+pub mod nftcp;
 
 #[cfg(test)]
 mod tests {
@@ -29,6 +30,8 @@ mod tests {
 
     use self::ipnet::Ipv4Net;
     use std::net::Ipv4Addr;
+    use std::net::{TcpStream, TcpListener, SocketAddr};
+    use std::io::Write;
 
     use e2d2::config::{basic_opts, read_matches};
     use e2d2::scheduler::*;
@@ -40,19 +43,20 @@ mod tests {
 
     const CONVERSION_FACTOR: f64 = 1000000000.;
     const KNI_NAME: &'static str = "vEth1"; //TODO use name from the argument list
+    const KNI_NETNS: &'static str = "nskni";
 
     /// mac and IP address to assign to Linux KNI interface
     const KNI_MAC: &'static str = "8e:f7:35:7e:73:91";
     const PROXY_IP: &'static str = "192.168.222.1/24";
     const PROXY_CPORT: u16 = 389;
 
-    const TARGET_IP1: &'static str = "192.168.222.4";
-    const TARGET_PORT1: u16 = 2389;
-    const TARGET_MAC1: &'static str = "00:0c:29:64:43:b6"; //TODO get this from linux, maybe mac of gw
+    const TARGET_IP1: &'static str = "192.168.222.3";
+    const TARGET_PORT1: u16 = 54321;
+    const TARGET_MAC1: &'static str = "00:0c:29:64:43:ac"; //TODO get this from linux, maybe mac of gw
 
-    const TARGET_IP2: &'static str = "192.168.222.5";
-    const TARGET_PORT2: u16 = 2389;
-    const TARGET_MAC2: &'static str = "00:0c:29:64:43:c0"; //TODO get this from linux, maybe mac of gw
+    const TARGET_IP2: &'static str = "192.168.222.3";
+    const TARGET_PORT2: u16 = 54322;
+    const TARGET_MAC2: &'static str = "00:0c:29:64:43:ac"; //TODO get this from linux, maybe mac of gw
 
     #[derive(Debug, Clone)]
 
@@ -159,8 +163,10 @@ mod tests {
         let f_select_server = move |c: &mut Connection| {
             if c.payload[0] & 1u8 == 1u8 {
                 c.server = Some(server_1);
+                info!("selecting server 1");
             } else {
                 c.server = Some(server_2);
+                info!("selecting server 2");
             }
 
             if let Some(_) = c.userdata {
@@ -216,6 +222,8 @@ mod tests {
     #[test]
     fn delayed_binding_proxy() {
 
+        let timeout = Duration::from_millis(500 as u64);
+
         fn am_root() -> bool {
             match env::var("USER") {
                 Ok(val) => val == "root",
@@ -235,8 +243,34 @@ mod tests {
         ctrlc::set_handler(move || {
             info!("received SIGINT or SIGTERM");
             r.store(false, Ordering::SeqCst);
-        }).expect("Error setting Ctrl-C handler");
+        }).expect("error setting Ctrl-C handler");
 
+
+        let listener1: TcpListener;
+        if let Ok(listener1) = TcpListener::bind((TARGET_IP1, TARGET_PORT1)) {
+            debug!("bound first TcpListener to {}:{}", TARGET_IP1, TARGET_PORT1)
+        } else {
+            panic!(
+                "failed to bind first TcpListener to {}:{}",
+                TARGET_IP1,
+                TARGET_PORT1
+            );
+        }
+
+        let listener2: TcpListener;
+        if let Ok(listener2) = TcpListener::bind((TARGET_IP2, TARGET_PORT2)) {
+            debug!(
+                "bound second TcpListener to {}:{}",
+                TARGET_IP2,
+                TARGET_PORT2
+            );
+        } else {
+            panic!(
+                "failed to bind second TcpListener to {}:{}",
+                TARGET_IP2,
+                TARGET_PORT2
+            );
+        }
 
         let mut opts = basic_opts();
         opts.optflag("t", "test", "Test mode do not use real ports");
@@ -289,54 +323,60 @@ mod tests {
 
                 context.execute();
 
-                setup_kni(KNI_NAME, PROXY_IP, KNI_MAC);
+                setup_kni(KNI_NAME, PROXY_IP, KNI_MAC, KNI_NETNS);
 
-                let mut pkts_so_far = (0, 0);
-                let mut last_printed = 0.;
-                const MAX_PRINT_INTERVAL: f64 = 30.;
-                const PRINT_DELAY: f64 = 15.;
-                let sleep_delay = 10 as u64;
-                let mut start = time::precise_time_ns() as f64 / CONVERSION_FACTOR;
-                let start0 = start;
-                let sleep_time = Duration::from_millis(sleep_delay);
 
-                info!("0 OVERALL RX 0.00 TX 0.00 CYCLE_PER_DELAY 0 0 0");
-                while running.load(Ordering::SeqCst) {
-                    thread::sleep(sleep_time); // Sleep for a bit
-                    let now = time::precise_time_ns() as f64 / CONVERSION_FACTOR;
-                    if now - start > PRINT_DELAY {
-                        let mut rx = 0;
-                        let mut tx = 0;
-                        for port in context.ports.values() {
-                            for q in 0..port.rxqs() {
-                                let (rp, tp) = port.stats(q);
-                                rx += rp;
-                                tx += tp;
-                            }
-                        }
-                        let pkts = (rx, tx);
-                        let rx_pkts = pkts.0 - pkts_so_far.0;
-                        if rx_pkts > 0 || now - last_printed > MAX_PRINT_INTERVAL {
-                            info!(
-                                "{:.2}: {:.2} OVERALL RX {:.2} TX {:.2}",
-                                now - start0,
-                                now - start,
-                                rx_pkts as f64 / (now - start),
-                                (pkts.1 - pkts_so_far.1) as f64 / (now - start)
-                            );
-                            last_printed = now;
-                            start = now;
-                            pkts_so_far = pkts;
-                        }
+                // create a first test connection
+                if let Ok(mut stream1) = TcpStream::connect_timeout(
+                    &SocketAddr::from((
+                        PROXY_IP.parse::<Ipv4Net>().unwrap().addr(),
+                        PROXY_CPORT,
+                    )),
+                    timeout,
+                )
+                {
+                    debug!("first test connection: TCP connect to proxy successful");
+                    stream1.set_write_timeout(Some(timeout));
+                    if let Ok(_) = stream1.write(&[1u8]) {
+                        debug!("success in writing to first test connection");
+                    } else {
+                        panic!("error when writing to first test connection");
                     }
+                } else {
+                    panic!("first test connection: 3-way handshake with proxy failed");
                 }
+
+                // create a second test connection
+                if let Ok(mut stream2) = TcpStream::connect_timeout(
+                    &SocketAddr::from((
+                        PROXY_IP.parse::<Ipv4Net>().unwrap().addr(),
+                        PROXY_CPORT,
+                    )),
+                    timeout,
+                )
+                {
+                    debug!("second test connection: TCP connect to proxy successful");
+                    stream2.set_write_timeout(Some(timeout));
+                    if let Ok(_) = stream2.write(&[2u8]) {
+                        debug!("success in writing to second test connection");
+                    } else {
+                        panic!("error when writing to second test connection");
+                    }
+                } else {
+                    panic!("second test connection: 3-way handshake with proxy failed");
+                }
+
+                debug!("main thread goes sleeping ...");
+                thread::sleep(Duration::from_millis(2000 as u64)); // Sleep for a bit
+                debug!("main thread awake again");
+
                 info!("terminating ProxyEngine ...");
                 std::process::exit(0);
             }
             Err(ref e) => {
                 error!("Error: {}", e);
                 if let Some(backtrace) = e.backtrace() {
-                    error!("Backtrace: {:?}", backtrace);
+                    debug!("Backtrace: {:?}", backtrace);
                 }
                 std::process::exit(1);
             }

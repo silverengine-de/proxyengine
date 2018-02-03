@@ -8,6 +8,7 @@ authors = ["Rainer Stademann <rainer.stademann@silverengine.de>"]
 
 [dependencies]
 e2d2 = { path = "../../gitclones/NetBricks/framework", features = ["performance"] }
+#e2d2 = { git = "https://github.com/rstade/NetBricks", branch = "e2d2-0-1-1" }
 rand = "0.3"
 fnv = "*"
 log = "0.3"
