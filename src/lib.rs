@@ -32,6 +32,7 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::net::{TcpStream, TcpListener, SocketAddr};
     use std::io::Write;
+    use std::io::Read;
 
     use e2d2::config::{basic_opts, read_matches};
     use e2d2::scheduler::*;
@@ -245,33 +246,6 @@ mod tests {
             r.store(false, Ordering::SeqCst);
         }).expect("error setting Ctrl-C handler");
 
-
-        let listener1: TcpListener;
-        if let Ok(listener1) = TcpListener::bind((TARGET_IP1, TARGET_PORT1)) {
-            debug!("bound first TcpListener to {}:{}", TARGET_IP1, TARGET_PORT1)
-        } else {
-            panic!(
-                "failed to bind first TcpListener to {}:{}",
-                TARGET_IP1,
-                TARGET_PORT1
-            );
-        }
-
-        let listener2: TcpListener;
-        if let Ok(listener2) = TcpListener::bind((TARGET_IP2, TARGET_PORT2)) {
-            debug!(
-                "bound second TcpListener to {}:{}",
-                TARGET_IP2,
-                TARGET_PORT2
-            );
-        } else {
-            panic!(
-                "failed to bind second TcpListener to {}:{}",
-                TARGET_IP2,
-                TARGET_PORT2
-            );
-        }
-
         let mut opts = basic_opts();
         opts.optflag("t", "test", "Test mode do not use real ports");
 
@@ -325,6 +299,51 @@ mod tests {
 
                 setup_kni(KNI_NAME, PROXY_IP, KNI_MAC, KNI_NETNS);
 
+                thread::spawn(|| {
+                    let listener1: TcpListener;
+                    if let Ok(listener1) = TcpListener::bind((TARGET_IP1, TARGET_PORT1)) {
+                        debug!("bound first TcpListener to {}:{}", TARGET_IP1, TARGET_PORT1);
+                        for stream in listener1.incoming() {
+                            let mut stream = stream.unwrap();
+                            let mut buf = [0u8; 16];
+                            stream.read(&mut buf[..]);
+                            debug!("first listener received a {}", buf[0]);
+                        }
+                    } else {
+                        panic!(
+                            "failed to bind first TcpListener to {}:{}",
+                            TARGET_IP1,
+                            TARGET_PORT1
+                        );
+                    }
+                });
+
+                thread::spawn(|| {
+                    let listener2: TcpListener;
+                    if let Ok(listener2) = TcpListener::bind((TARGET_IP2, TARGET_PORT2)) {
+                        debug!(
+                            "bound second TcpListener to {}:{}",
+                            TARGET_IP2,
+                            TARGET_PORT2
+                        );
+                        for stream in listener2.incoming() {
+                            let mut stream = stream.unwrap();
+                            let mut buf = [0u8; 16];
+                            stream.read(&mut buf[..]);
+                            debug!("second listener received a {}", buf[0]);
+                        }
+                    } else {
+                        panic!(
+                            "failed to bind second TcpListener to {}:{}",
+                            TARGET_IP2,
+                            TARGET_PORT2
+                        );
+                    }
+                });
+
+
+
+                thread::sleep(Duration::from_millis(100 as u64)); // wait for the listeners
 
                 // create a first test connection
                 if let Ok(mut stream1) = TcpStream::connect_timeout(

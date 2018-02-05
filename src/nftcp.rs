@@ -19,6 +19,7 @@ use std::process::Command;
 use rand;
 
 const PROXY_PORT_MIN: u16 = 65526;
+const MIN_FRAME_SIZE: usize = 60; // without fcs
 
 use fnv::FnvHasher;
 type FnvHash = BuildHasherDefault<FnvHasher>;
@@ -604,7 +605,7 @@ pub fn setup_forwarder<S, F1, F2>(
                 let oldseqn=h.tcp.seq_num();
                 let newseqn=oldseqn.wrapping_add(c.c2s_inserted_bytes as u32);
                 if c.c2s_inserted_bytes!=0 {
-                     h.tcp.set_seq_num(newseqn);
+                    h.tcp.set_seq_num(newseqn);
                     h.tcp.update_checksum_incremental(
                         !finalize_checksum(oldseqn),
                         !finalize_checksum(newseqn),
@@ -660,6 +661,13 @@ pub fn setup_forwarder<S, F1, F2>(
                 //debug!("translated s->c: {}", p);                
             }
             
+            #[inline]
+            pub fn tcpip_payload_size<M: Sized+ Send>(p:&Packet<TcpHeader,M>) -> u16 {
+                let iph = p.get_pre_header().unwrap();
+                // payload size = ip total length - ip header length -tcp header length
+                iph.length() - (iph.ihl() as u16) * 4u16 - (p.get_header().data_offset() as u16) * 4u16
+            }
+            
             fn select_server<M: Sized+ Send, F>(
                 p: &mut Packet<TcpHeader,M>, 
                 c: &mut Connection, 
@@ -669,24 +677,20 @@ pub fn setup_forwarder<S, F1, F2>(
             )
             where F: Fn(&mut Connection),
             {
+                let payload_sz=tcpip_payload_size(p);
                 {
                     // safe the payload for later
-                    p.copy_payload_to_bytearray(&mut c.payload);
+                    p.copy_payload_to_bytearray(&mut c.payload, payload_sz);
                     let old_payload_size=c.payload.len();
                     f_select_server(c);
                     c.c2s_inserted_bytes=c.payload.len()-old_payload_size;
                 }
                 // create a SYN Packet from the current packet
                 // remove payload
-                let payload_sz:u16;
-                { 
-                  let iph=p.get_pre_header().unwrap();
-                  // payload size = ip total length - ip header length -tcp header length
-                  payload_sz=iph.length()-(iph.ihl() as u16)*4u16 - (p.get_header().data_offset() as u16)*4u16;
-                  debug!("select_server: iph.length= {}, tcp data offset= {}, payload_sz= {}", 
-                      iph.length(), p.get_header().data_offset(), payload_sz);
-                  h.ip.trim_length_by(payload_sz as u16);
-                }
+
+                debug!("select_server:  payload_sz= {}", payload_sz);
+                h.ip.trim_length_by(payload_sz as u16);
+                
                 // 60 is the minimum data length (4 bytes FCS not included)
                 let trim_by= min(p.data_len()- 60usize, payload_sz as usize);
                 p.trim_payload_size(trim_by);
@@ -743,6 +747,11 @@ pub fn setup_forwarder<S, F1, F2>(
                     { 
                         let h_tcp=delayed_p.get_mut_header();
                         h_tcp.set_psh_flag();        
+                    }
+                    let n_padding_bytes=MIN_FRAME_SIZE-delayed_p.data_len();
+                    if n_padding_bytes > 0 {
+                        debug!("padding with {} 0x0 bytes", n_padding_bytes);
+                        delayed_p.add_padding(n_padding_bytes);
                     }
                     // let sz=delayed_p.payload_size() as u32;
                     // delayed_p.get_mut_header().set_seq_num(c.f_seqn+sz);
@@ -802,7 +811,14 @@ pub fn setup_forwarder<S, F1, F2>(
                     c.c_state=TcpState::Established;
                     debug!("client socket established for s-port: { }", c.proxy_sport);
                 }
-                else if hs.tcp.fin_flag() {
+                else if hs.tcp.ack_flag() && c.c_state == TcpState::CloseWait {
+                    c.c_state == TcpState::LastAck;
+                    c.s_state == TcpState::Closed;
+                    client_to_server(p, &mut c, &mut hs, &pd, &f_process_payload_c_s);
+                    group_index= 1;                                          
+                }
+                else if hs.tcp.fin_flag() && c.s_state != TcpState::Listen && c.s_state != TcpState::SynReceived {
+                    // in case the server connection is still not stable, we can only ignore the FIN
                     if c.c_state == TcpState::CloseWait {
                         if hs.tcp.ack_flag() {
                             // we got a FIN-ACK as a receipt to a sent FIN (server closed connection)
@@ -812,9 +828,8 @@ pub fn setup_forwarder<S, F1, F2>(
                         }                            
                     } else {
                         // client closes connection
-                        // we dont care about its state
-                        debug!("client closes connection on port {}/{} in state {:?}",
-                            hs.tcp.src_port(), c.proxy_sport, c.c_state,
+                        debug!("client closes connection on port {}/{} in state {:?}/{:?}",
+                            hs.tcp.src_port(), c.proxy_sport, c.c_state, c.s_state
                         );
                         c.c_state= TcpState::FinWait;
                         c.s_state= TcpState::CloseWait;
@@ -857,7 +872,7 @@ pub fn setup_forwarder<S, F1, F2>(
             } else {
                 // should be server to client
                 { 
-                       let mut c = sm.get_mut(CKey::Port(hs.tcp.dst_port()));
+                    let mut c = sm.get_mut(CKey::Port(hs.tcp.dst_port()));
                     if c.is_some() {
                         // debug!("proxy port has state");
                         let mut c = c.as_mut().unwrap();
