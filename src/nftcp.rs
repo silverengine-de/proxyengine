@@ -24,9 +24,8 @@ const MIN_FRAME_SIZE: usize = 60; // without fcs
 use fnv::FnvHasher;
 type FnvHash = BuildHasherDefault<FnvHasher>;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum TcpState {
-    Closed,
     Listen,
     SynReceived,
     SynSent,
@@ -34,6 +33,7 @@ pub enum TcpState {
     CloseWait,
     FinWait,
     LastAck,
+    Closed,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -620,7 +620,7 @@ pub fn setup_forwarder<S, F1, F2>(
             }
             
             fn server_to_client<M: Sized+ Send>(
-                p: &mut Packet<TcpHeader,M>, 
+                p: &mut Packet<TcpHeader,M>, // we will need this once s->c payload inspection is required
                 c: &mut Connection, 
                 h: &mut HeaderState, 
                 pd: &L234Data,            
@@ -794,6 +794,8 @@ pub fn setup_forwarder<S, F1, F2>(
             };
             // if this port is set by the following tcp state machine, the port/connection becomes released afterwards
             let mut release_proxy_sport = None;
+            
+          
             if hs_flow.dst_port == pd.port {
                 //debug!("client to server");
                 let key= CKey::Socket(hs_flow.src_socket_addr());
@@ -801,57 +803,30 @@ pub fn setup_forwarder<S, F1, F2>(
                 // we only handle active open on client side:
                 // we reset server and client state 
                 //TODO revisit this approach
-                if hs.tcp.syn_flag() { 
-                    c.c_state=TcpState::SynSent;
-                    c.s_state=TcpState::Listen;
-                    client_syn_received(p, &mut c, &mut hs); // replies with a SYN-ACK to client
-                    group_index=1;                                        
+ 
+                let old_s_state = c.s_state;
+                let old_c_state = c.c_state; 
+        
+                if hs.tcp.syn_flag() {
+                    if c.c_state == TcpState::Listen { 
+                        c.c_state=TcpState::SynSent;
+                        c.s_state=TcpState::Listen;
+                        client_syn_received(p, &mut c, &mut hs); // replies with a SYN-ACK to client
+                        group_index=1;
+                    }
+                    else { warn!("received client SYN in state {:?}/{:?}", c.c_state, c.s_state); }                                          
                 } 
                 else if hs.tcp.ack_flag() && c.c_state == TcpState::SynSent {
                     c.c_state=TcpState::Established;
-                    debug!("client socket established for s-port: { }", c.proxy_sport);
+                    debug!("client side connection established for {:?}", hs_flow.src_socket_addr());
                 }
-                else if hs.tcp.ack_flag() && c.c_state == TcpState::CloseWait {
-                    c.c_state == TcpState::LastAck;
-                    c.s_state == TcpState::Closed;
-                    client_to_server(p, &mut c, &mut hs, &pd, &f_process_payload_c_s);
-                    group_index= 1;                                          
+                else if hs.tcp.ack_flag() && c.s_state == TcpState::FinWait {
+                    c.c_state = TcpState::CloseWait;
+                    c.s_state = TcpState::Closed; 
+                    if hs.tcp.fin_flag() { c.c_state = TcpState::LastAck }
+                    debug!("transition to client/server state {:?}/{:?}", c.c_state, c.s_state);                                       
                 }
-                else if hs.tcp.fin_flag() && c.s_state != TcpState::Listen && c.s_state != TcpState::SynReceived {
-                    // in case the server connection is still not stable, we can only ignore the FIN
-                    if c.c_state == TcpState::CloseWait {
-                        if hs.tcp.ack_flag() {
-                            // we got a FIN-ACK as a receipt to a sent FIN (server closed connection)
-                                  debug!("received FIN-ACK on port {}", hs.tcp.src_port());
-                            c.c_state == TcpState::LastAck;
-                            c.s_state == TcpState::Closed;
-                        }                            
-                    } else {
-                        // client closes connection
-                        debug!("client closes connection on port {}/{} in state {:?}/{:?}",
-                            hs.tcp.src_port(), c.proxy_sport, c.c_state, c.s_state
-                        );
-                        c.c_state= TcpState::FinWait;
-                        c.s_state= TcpState::CloseWait;
-                    }
-                    if c.server.is_some() {
-                        client_to_server(p, &mut c, &mut hs, &pd, &f_process_payload_c_s);
-                        group_index=1;                 
-                    }
-                    else { group_index=0; }
-                }
-                else if c.c_state == TcpState::Established {
-                    if c.s_state == TcpState::Listen {
-                        debug!("selecting server after 3 way handshake");
-                        select_server(p, &mut c, &mut hs, &pd, &f_select_server);
-                        c.s_state= TcpState::SynReceived;
-                        group_index= 1;
-                    } else if c.s_state == TcpState::Established {
-                        // this is the c->s part of the stable two-way connection state
-                        client_to_server(p, &mut c, &mut hs, &pd, &f_process_payload_c_s);
-                        group_index= 1;
-                    }
-                } else if c.c_state==TcpState::Closed && hs.tcp.ack_flag() {
+                else if c.s_state==TcpState::LastAck && hs.tcp.ack_flag() {
                     // received final ack from client for client initiated close
                     debug!("received final ACK for client initiated close on port {}/{}",
                         hs.tcp.src_port(), c.proxy_sport,
@@ -860,22 +835,56 @@ pub fn setup_forwarder<S, F1, F2>(
                     c.c_state= TcpState::Listen;
                     // release connection in the next block after the state machine
                     release_proxy_sport=Some(c.proxy_sport);
-                    client_to_server(p, &mut c, &mut hs, &pd, &f_process_payload_c_s);
-                    group_index=1;
-                } 
-                else {
-                    debug!("unexpected client-side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
+                    debug!("releasing connection state for {}/{}", hs.tcp.src_port(), c.proxy_sport);
+                }
+                else if hs.tcp.fin_flag() {
+                    if c.s_state >= TcpState::FinWait {
+                        // we got a FIN as a receipt to a sent FIN (server closed connection)
+                        debug!("received FIN-reply from client {:?}", hs_flow.src_socket_addr());
+                        c.c_state = TcpState::LastAck;
+                        c.s_state = TcpState::Closed;                               
+                    } else {
+                        // client wants to close connection
+                        debug!("client sends FIN on port {}/{} in state {:?}/{:?}",
+                            hs.tcp.src_port(), c.proxy_sport, c.c_state, c.s_state
+                        );
+                        if c.s_state >= TcpState::Established {
+                            c.c_state = TcpState::FinWait;
+                        }
+                        // in case the server connection is still not stable, we can only ignore the FIN
+                        else { debug!("ignoring FIN request"); group_index=0; }
+                    }
+                }
+                else if c.c_state == TcpState::Established && c.s_state == TcpState::Listen {
+                    // should be the first payload packet from client
+                    debug!("selecting server after 3 way handshake");
+                    select_server(p, &mut c, &mut hs, &pd, &f_select_server);
+                    c.s_state= TcpState::SynReceived;
+                    group_index= 1; 
+                }  
+                else if c.s_state < TcpState::Established || c.c_state < TcpState::Established {
+                    warn!("unexpected client-side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
                         hs.tcp.src_port(), c.proxy_sport, c.c_state, c.s_state,
                     );
                     group_index= 2;
-                }               
+                }           
+                
+                // once we established a two-way e2e-connection, we always forward the packets
+                if old_s_state >= TcpState::Established && old_c_state >= TcpState::Established {                        
+                    client_to_server(p, &mut c, &mut hs, &pd, &f_process_payload_c_s);
+                    group_index= 1;
+                }
             } else {
                 // should be server to client
                 { 
+                    // debug!("looking up state for server side port { }", hs.tcp.dst_port());
                     let mut c = sm.get_mut(CKey::Port(hs.tcp.dst_port()));
                     if c.is_some() {
-                        // debug!("proxy port has state");
                         let mut c = c.as_mut().unwrap();
+                        let mut b_unexpected=false;
+                        let old_s_state = c.s_state;
+                        let old_c_state = c.c_state; 
+                        
                         if c.s_state == TcpState::SynReceived && hs.tcp.ack_flag() && hs.tcp.syn_flag() {
                             c.s_state= TcpState::Established;
                             debug!("established two-way client server connection");
@@ -883,49 +892,54 @@ pub fn setup_forwarder<S, F1, F2>(
                             group_index=0;  // packets are sent via extra queue
                         }
                         else if hs.tcp.fin_flag() {
-                            if c.s_state == TcpState::CloseWait  {
-                                if hs.tcp.ack_flag() { // FIN+ACK
-                                    // got FIN receipt to a client initiated FIN 
-                                    debug!("received FIN-ACK on port {}", hs.tcp.dst_port());
-                                    c.s_state = TcpState::LastAck;
-                                    c.c_state = TcpState::Closed;
-                                } 
+                            if c.c_state >= TcpState::FinWait  {
+                                // got FIN receipt to a client initiated FIN 
+                                debug!("received FIN-reply from server on port {}", hs.tcp.dst_port());
+                                c.s_state = TcpState::LastAck;
+                                c.c_state = TcpState::Closed;
                             }
                             else { // server initiated TCP close
                                 debug!("server closes connection on port {}/{} in state {:?}",
                                     hs.tcp.dst_port(), c.client_sock.port(), c.s_state,
                                 ); 
                                 c.s_state = TcpState::FinWait;
-                                c.c_state = TcpState::CloseWait; 
-                            }
-                            server_to_client(p, &mut c, &mut hs, &pd);
-                            group_index=1;                            
+                            }                           
                         }
-                        else if c.s_state == TcpState::Established && c.c_state == TcpState::Established {                        
-                            // this is the s->c part of the stable two-way connection state
-                            // translate packets and forward to client
-                            server_to_client(p, &mut c, &mut hs, &pd);
-                            group_index=1; 
-                        } else if c.s_state==TcpState::Closed && hs.tcp.ack_flag() {
+                        else if c.c_state==TcpState::LastAck && hs.tcp.ack_flag() {
                             // received final ack from server for server initiated close
                             debug!("received final ACK for server initiated close on port { }", hs.tcp.dst_port());
                             c.s_state= TcpState::Listen;
                             c.c_state= TcpState::Listen;
                             // release connection in the next block
                             release_proxy_sport=Some(c.proxy_sport);
+                        }
+                        else {
+                            // debug!("received from server { } in c/s state {:?}/{:?} ", hs.tcp, c.c_state, c.s_state);
+                            b_unexpected=true; //  except we revise it, see below
+                        } 
+
+                         // once we established a two-way e2e-connection, we always forward the packets
+                        if old_s_state >= TcpState::Established && old_c_state >= TcpState::Established {                        
+                            // this is the s->c part of the stable two-way connection state
+                            // translate packets and forward to client
                             server_to_client(p, &mut c, &mut hs, &pd);
-                            group_index=1; 
-                        } else {
-                            debug!("unexpected server side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
+                            group_index=1;
+                            b_unexpected=false; 
+                        }
+                         
+                        if b_unexpected {
+                            warn!("unexpected server side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
                                 hs.tcp.dst_port(), c.client_sock.port(), c.c_state, c.s_state,
                             );
                             group_index= 2;
-                        }                               
+                        }
+                        
                     } else {
-                        debug!("proxy port has no state, sending to KNI i/f");
+                        warn!("proxy port has no state, sending to KNI i/f");
                         // we send this to KNI which handles out-of-order TCP, e.g. by sending RST
                         group_index=2;
                     }
+                    
                 }
             }
             // here we check if we shall release the connection state,

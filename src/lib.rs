@@ -341,8 +341,6 @@ mod tests {
                     }
                 });
 
-
-
                 thread::sleep(Duration::from_millis(100 as u64)); // wait for the listeners
 
                 // create a first test connection
