@@ -46,7 +46,7 @@ mod tests {
     const KNI_NAME: &'static str = "vEth1"; //TODO use name from the argument list
     const KNI_NETNS: &'static str = "nskni";
 
-    /// mac and IP address to assign to Linux KNI interface
+    /// mac and IP address to assign to Linux KNI interface, i.e. the proxyengine
     const KNI_MAC: &'static str = "8e:f7:35:7e:73:91";
     const PROXY_IP: &'static str = "192.168.222.1/24";
     const PROXY_CPORT: u16 = 389;
@@ -308,6 +308,7 @@ mod tests {
                             let mut buf = [0u8; 16];
                             stream.read(&mut buf[..]);
                             debug!("first listener received a {}", buf[0]);
+                            stream.write(&[11u8]);
                         }
                     } else {
                         panic!(
@@ -331,6 +332,7 @@ mod tests {
                             let mut buf = [0u8; 16];
                             stream.read(&mut buf[..]);
                             debug!("second listener received a {}", buf[0]);
+                            stream.write(&[12u8]);
                         }
                     } else {
                         panic!(
@@ -354,8 +356,19 @@ mod tests {
                 {
                     debug!("first test connection: TCP connect to proxy successful");
                     stream1.set_write_timeout(Some(timeout));
+                    stream1.set_read_timeout(Some(timeout));
                     if let Ok(_) = stream1.write(&[1u8]) {
                         debug!("success in writing to first test connection");
+                        let mut buf = [0u8; 16];
+                        if let Ok(_) = stream1.read(&mut buf[..]) {
+                            if buf[0] == 11u8 {
+                                info!("reply on first connection is ok!");
+                            } else {
+                                panic!("wrong reply on first connection");
+                            }
+                        } else {
+                            panic!("timeout on first connection while waiting for answer");
+                        };
                     } else {
                         panic!("error when writing to first test connection");
                     }
@@ -374,8 +387,19 @@ mod tests {
                 {
                     debug!("second test connection: TCP connect to proxy successful");
                     stream2.set_write_timeout(Some(timeout));
+                    stream2.set_read_timeout(Some(timeout));
                     if let Ok(_) = stream2.write(&[2u8]) {
                         debug!("success in writing to second test connection");
+                        let mut buf = [0u8; 16];
+                        if let Ok(_) = stream2.read(&mut buf[..]) {
+                            if buf[0] == 12u8 {
+                                info!("reply on second connection is ok!");
+                            } else {
+                                panic!("wrong reply on second connection");
+                            }
+                        } else {
+                            panic!("timeout on second connection while waiting for answer");
+                        };
                     } else {
                         panic!("error when writing to second test connection");
                     }
