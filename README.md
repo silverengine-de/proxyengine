@@ -21,11 +21,11 @@ ProxyEngine includes a test module. However for using this module, the network i
 First a network interface for user-space DPDK is needed. This interface is used by the proxy to connect to clients and servers (in the example code this interface uses PCI slot 03:00.0). 
 
 Secondly an extra Linux interface is required which is used by the test module for placing client and server stacks (in the example code ens34).
-Both interfaces must be connected to a bridge, e.g. a host-only network of the VMWare hypervisor. Using Wireshark on this network allows us to observe the complete traffic exchange between clients, the proxy and the servers.
+Both interfaces must be connected to a bridge, e.g. a host-only network of the hypervisor. Using Wireshark on this network allows us to observe the complete traffic exchange between clients, the proxy and the servers.
 
 In addition some constants like the Linux interface name and the IP / MAC addresses in the test module code need to be adapted. 
 
-ProxyEngine is so far tested on a virtual machine running Fedora 27 on a Windows 7 host using the VMWare Workstation hypervisor.
+ProxyEngine is so far tested on a virtual machine running Fedora 27 on a Windows 7 host.
 
 _**ProxyEngine Test Scenario**_
 
