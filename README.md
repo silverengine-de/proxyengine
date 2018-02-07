@@ -29,4 +29,4 @@ ProxyEngine is so far tested on a virtual machine running Fedora 27 on a Windows
 
 _**ProxyEngine Test Configuration**_
 
-[proxyengine test configuration](https://github.com/silverengine-de/proxyengine/blob/master/proxyengine_config.png)
+![proxyengine test configuration](https://github.com/silverengine-de/proxyengine/blob/master/proxyengine_config.png)
