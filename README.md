@@ -27,6 +27,6 @@ In addition some constants like the Linux interface name and the IP / MAC addres
 
 ProxyEngine is so far tested on a virtual machine running Fedora 27 on a Windows 7 host.
 
-_**ProxyEngine Test Scenario**_
+_**ProxyEngine Test Configuration**_
 
-to be completed
+[proxyengine test configuration](https://github.com/silverengine-de/proxyengine/proxyengine_config.png)
