@@ -275,6 +275,10 @@ impl Executable for KniHandleRequest {
     }
 }
 
+pub fn is_kni_core(pci: &CacheAligned<PortQueue>) -> bool {
+    pci.rxq() == 0
+}
+
 pub fn setup_kni(kni_name: &str, ip_address: &str, mac_address: &str, kni_netns: &str) {
 
     debug!("setup_kni");
@@ -418,25 +422,27 @@ pub fn setup_forwarder<S, F1, F2>(
     // we need this queue for the delayed bindrequest
     let (producer, consumer) = new_mpsc_queue_pair();
 
-    // forwarding frames coming from KNI to PCI
-    let forward2pci = ReceiveBatch::new(kni.clone())
-        .parse::<MacHeader>()
-        .transform(box move |p| {
-            let ethhead = p.get_mut_header();
-            debug!("sending KNI frame to PCI: Eth header = { }", &ethhead);
-        })
-        .send(pci.clone());
-    sched.add_task(forward2pci).unwrap();
+    // forwarding frames coming from KNI to PCI, if we are the kni core
+    if is_kni_core(pci) {
+        let forward2pci = ReceiveBatch::new(kni.clone())
+            .parse::<MacHeader>()
+            .transform(box move |p| {
+                let ethhead = p.get_mut_header();
+                debug!("sending KNI frame to PCI: Eth header = { }", &ethhead);
+            })
+            .send(pci.clone());
+        sched.add_task(forward2pci).unwrap();
+    }
 
     // only accept traffic from PCI with matching L2 address
     let l2filter_from_pci = ReceiveBatch::new(pci.clone()).parse::<MacHeader>().filter(
         box move |p| {
             let header = p.get_header();
             if header.dst == pd.mac {
-                //debug!("from pci: found mac: {} ", &header);
+                debug!("from pci: found mac: {} ", &header);
                 true
             } else if header.dst.is_multicast() || header.dst.is_broadcast() {
-                //debug!("from pci: multicast mac: {} ", &header);
+                debug!("from pci: multicast mac: {} ", &header);
                 true
             } else {
                 debug!("from pci: discarding because mac unknown: {} ", &header);
@@ -459,10 +465,10 @@ pub fn setup_forwarder<S, F1, F2>(
                 let ipflow = ipflow.unwrap();
                 if ipflow.dst_ip == pd.ip && ipflow.proto == 6 {
                     if ipflow.dst_port == pd.port || ipflow.dst_port >= PROXY_PORT_MIN {
-                        // debug!("proxy tcp flow: {:?}", ipflow);
+                        debug!("proxy tcp flow: {:?}", ipflow);
                         1
                     } else {
-                        // debug!("no proxy tcp flow: {:?}", ipflow);
+                        debug!("no proxy tcp flow: {:?}", ipflow);
                         0
                     }
                 } else {
@@ -574,11 +580,7 @@ pub fn setup_forwarder<S, F1, F2>(
                 h.ip.set_src(pd.ip);
                 h.tcp.set_src_port(c.proxy_sport);            
             }
-            /*
-            extern "C" {
-                pub fn process_payload(p_payload: *mut u8, size: usize, free_size: usize) -> usize;
-            }
-            */
+
             fn client_to_server<M: Sized+ Send, F>(
                 p: &mut Packet<TcpHeader,M>, 
                 c: &mut Connection, 
@@ -966,4 +968,5 @@ pub fn setup_forwarder<S, F1, F2>(
     sched.add_task(pipe2kni).unwrap();
     sched.add_task(pipe2pci).unwrap();
     sched.add_task(consumer.send(pci.clone())).unwrap();
+
 }

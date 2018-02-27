@@ -27,6 +27,7 @@ mod tests {
     use std::time::Duration;
     use std::thread;
     use std::any::Any;
+    use std::collections::HashSet;
 
     use self::ipnet::Ipv4Net;
     use std::net::Ipv4Addr;
@@ -109,7 +110,7 @@ mod tests {
         }
     }
 
-    pub fn setup_pipelines<S>(ports: Vec<CacheAligned<PortQueue>>, sched: &mut S)
+    pub fn setup_pipelines<S>(ports: HashSet<CacheAligned<PortQueue>>, sched: &mut S)
     where
         S: Scheduler + Sized,
     {
@@ -117,28 +118,35 @@ mod tests {
         let mut pci: Option<&CacheAligned<PortQueue>> = None;
         for port in &ports {
             debug!(
-                "setup_pipelines: port {} --  {} rxq {} txq {}",
-                port.port.name(),
+                "setup_pipelines: port {}:{} --  {} rxq {} txq {}",
+                port.port.port_type(),
+                port.port.port_id(),
                 port.port.mac_address(),
                 port.rxq(),
                 port.txq(),
             );
             if port.port.is_kni() {
                 kni = Some(port);
-                debug!("is kni port!");
-                sched
-                    .add_task(KniHandleRequest { kni_port: port.port.clone() })
-                    .unwrap();
             } else {
                 pci = Some(port);
             }
         }
 
-        if kni.is_none() {
-            panic!("need at least one kni port");
-        }
         if pci.is_none() {
             panic!("need at least one pci port");
+        }
+
+        // kni receive queue is served on the first core (i.e. rxq==0)
+
+        if kni.is_none() && is_kni_core(pci.unwrap()) {
+            // we need a kni i/f for queue 0
+            panic!("need one kni port for queue 0");
+        }
+
+        if is_kni_core(pci.unwrap()) {
+            sched
+                .add_task(KniHandleRequest { kni_port: kni.unwrap().port.clone() })
+                .unwrap();
         }
 
         let proxy_data = L234Data {
@@ -204,8 +212,6 @@ mod tests {
             } */
         };
 
-
-
         setup_forwarder(
             pci.unwrap(),
             kni.unwrap(),
@@ -233,7 +239,7 @@ mod tests {
         }
 
         env_logger::init().unwrap();
-        debug!("Testing ProxyEngine ...");
+        info!("Testing ProxyEngine ...");
         if !am_root() {
             error!(" ... must run as root, e.g.: sudo -E env \"PATH=$PATH\" cargo test");
             std::process::exit(1);
@@ -249,19 +255,23 @@ mod tests {
         let mut opts = basic_opts();
         opts.optflag("t", "test", "Test mode do not use real ports");
 
-        // let args: Vec<String> = env::args().collect();
+        // for use of --vdev with KNI PMD, see https://dpdk.org/doc/guides/nics/kni.html
         let args: Vec<String> = vec![
             "proxyengine",
             "-m",
             "0",
             "-c",
             "1",
+            //"-c",
+            //"2",
             "-c",
             "1",
             "-p",
             "03:00.0",
+            //"-p",
+            //"03:00.0",
             "-p",
-            "kni:vEth1",
+            "kni:1",
             "-n",
             "proxyengine",
             "--primary",
@@ -280,24 +290,32 @@ mod tests {
         //  let (tx, rx) = channel::<TcpEvent>();
 
         match initialize_system(&configuration) {
-            //    match initialize_system::<TcpEvent>(&configuration) {
             Ok(mut context) => {
                 context.start_schedulers();
                 debug!("Number of PMD ports: {}", PmdPort::num_pmd_ports());
                 for port in context.ports.values() {
-                    debug!("port {} : mac_address= {}", port.name(), port.mac_address());
+                    debug!(
+                        "port {}:{} -- mac_address= {}",
+                        port.port_type(),
+                        port.port_id(),
+                        port.mac_address()
+                    );
                 }
 
                 if b_phy_ports {
-                    context.add_pipeline_to_run(Arc::new(move |p: Vec<CacheAligned<PortQueue>>,
-                          s: &mut StandaloneScheduler| {
-                        setup_pipelines(p, s)
-                    }));
+                    context.add_pipeline_to_run(
+                        Arc::new(move |p: HashSet<CacheAligned<PortQueue>>,
+                              s: &mut StandaloneScheduler| {
+                            setup_pipelines(p, s)
+                        }),
+                    );
                 }
+
 
                 context.execute();
 
                 setup_kni(KNI_NAME, PROXY_IP, KNI_MAC, KNI_NETNS);
+
 
                 thread::spawn(|| {
                     let listener1: TcpListener;
