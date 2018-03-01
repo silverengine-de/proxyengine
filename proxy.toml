@@ -1,0 +1,12 @@
+
+
+name        = "proxyengine"
+master_core = 0
+pool_size   = 2048              # default 2047
+cache_size  = 32                # default 32
+cores       = [ 1 ]
+ports       = [ 
+                    { name="13:00.0", rxd= 512, txd= 512, cores = [1] } ,
+                    { name="kni:1", rxd=64, txd=64, cores = [1] }
+              ] 
+vdev        = [ "net_kni0" ]

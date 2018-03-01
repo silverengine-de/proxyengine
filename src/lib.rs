@@ -54,11 +54,11 @@ mod tests {
 
     const TARGET_IP1: &'static str = "192.168.222.3";
     const TARGET_PORT1: u16 = 54321;
-    const TARGET_MAC1: &'static str = "00:0c:29:64:43:ac"; //TODO get this from linux, maybe mac of gw
+    const TARGET_MAC1: &'static str = "00:0c:29:64:43:a2"; //TODO get this from linux, but maybe mac of gw
 
     const TARGET_IP2: &'static str = "192.168.222.3";
     const TARGET_PORT2: u16 = 54322;
-    const TARGET_MAC2: &'static str = "00:0c:29:64:43:ac"; //TODO get this from linux, maybe mac of gw
+    const TARGET_MAC2: &'static str = "00:0c:29:64:43:a2"; //TODO get this from linux, but maybe mac of gw
 
     #[derive(Debug, Clone)]
 
@@ -118,9 +118,8 @@ mod tests {
         let mut pci: Option<&CacheAligned<PortQueue>> = None;
         for port in &ports {
             debug!(
-                "setup_pipelines: port {}:{} --  {} rxq {} txq {}",
-                port.port.port_type(),
-                port.port.port_id(),
+                "setup_pipelines: port {} --  {} rxq {} txq {}",
+                port.port,
                 port.port.mac_address(),
                 port.rxq(),
                 port.txq(),
@@ -258,6 +257,8 @@ mod tests {
         // for use of --vdev with KNI PMD, see https://dpdk.org/doc/guides/nics/kni.html
         let args: Vec<String> = vec![
             "proxyengine",
+            "-f",
+            "proxy.toml" /*
             "-m",
             "0",
             "-c",
@@ -267,9 +268,9 @@ mod tests {
             "-c",
             "1",
             "-p",
-            "03:00.0",
+            "13:00.0",
             //"-p",
-            //"03:00.0",
+            //"13:00.0", // driver vmxnet3 needs at least room for 512 descriptors
             "-p",
             "kni:1",
             "-n",
@@ -277,6 +278,7 @@ mod tests {
             "--primary",
             "--vdev",
             "net_kni0",
+            */,
         ].iter()
             .map(|x| x.to_string())
             .collect::<Vec<String>>();
@@ -284,12 +286,12 @@ mod tests {
             Ok(m) => m,
             Err(f) => panic!(f.to_string()),
         };
-        let configuration = read_matches(&matches, &opts);
+        let mut configuration = read_matches(&matches, &opts);
         let b_phy_ports = !matches.opt_present("test");
 
         //  let (tx, rx) = channel::<TcpEvent>();
 
-        match initialize_system(&configuration) {
+        match initialize_system(&mut configuration) {
             Ok(mut context) => {
                 context.start_schedulers();
                 debug!("Number of PMD ports: {}", PmdPort::num_pmd_ports());
