@@ -18,7 +18,7 @@ Note, that a local installation of NetBricks is necessary as it includes DPDK an
 
 ProxyEngine includes a test module. However for using this module, the network interfaces of the test machine need to be prepared (see [prepNet.sh](https://github.com/silverengine-de/proxyengine/blob/master/prepNet.sh)). 
 
-First a network interface for user-space DPDK is needed. This interface is used by the proxy to connect to clients and servers (in the example code this interface uses PCI slot 13:00.0). The current code is tested with virtual interface driver vmxnet3 (supports RSS) and previous single-thread versions with e1000e (single rx/tx queues).
+First a network interface for user-space DPDK is needed. This interface is used by the proxy to connect to clients and servers (in the example code this interface uses PCI slot 13:00.0). The current code is tested with virtual interface driver vmxnet3 and previous single rx/tx versions with e1000e.
 
 Secondly an extra Linux interface is required which is used by the test module for placing client and server stacks (in the example code ens192).
 Both interfaces must be connected to a bridge, e.g. a host-only network of the hypervisor. Using Wireshark on this network allows us to observe the complete traffic exchange between clients, the proxy and the servers.

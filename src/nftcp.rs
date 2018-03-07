@@ -433,19 +433,27 @@ pub fn setup_forwarder<S, F1, F2>(
             .send(pci.clone());
         sched.add_task(forward2pci).unwrap();
     }
+    let rxq0 = format!("<{}>: ", pci.rxq());
+    let rxq1 = format!("<{}>: ", pci.rxq());
+    let rxq2 = format!("<{}>: ", pci.rxq());
+    debug!("identify thread by rx port queue {}", rxq0);
 
     // only accept traffic from PCI with matching L2 address
     let l2filter_from_pci = ReceiveBatch::new(pci.clone()).parse::<MacHeader>().filter(
         box move |p| {
             let header = p.get_header();
             if header.dst == pd.mac {
-                debug!("from pci: found mac: {} ", &header);
+                debug!("{} from pci: found mac: {} ", rxq0, &header);
                 true
             } else if header.dst.is_multicast() || header.dst.is_broadcast() {
-                debug!("from pci: multicast mac: {} ", &header);
+                debug!("{} from pci: multicast mac: {} ", rxq0, &header);
                 true
             } else {
-                debug!("from pci: discarding because mac unknown: {} ", &header);
+                debug!(
+                    "{} from pci: discarding because mac unknown: {} ",
+                    rxq0,
+                    &header
+                );
                 false
             }
         },
@@ -459,20 +467,23 @@ pub fn setup_forwarder<S, F1, F2>(
             let payload = p.get_payload();
             let ipflow = ipv4_extract_flow(payload);
             if ipflow.is_none() {
-                debug!("not ip_flow");
+                debug!("{} not ip_flow", rxq1);
                 0
             } else {
                 let ipflow = ipflow.unwrap();
                 if ipflow.dst_ip == pd.ip && ipflow.proto == 6 {
                     if ipflow.dst_port == pd.port || ipflow.dst_port >= PROXY_PORT_MIN {
-                        debug!("proxy tcp flow: {:?}", ipflow);
+                        debug!("{} proxy tcp flow: {:?}", rxq1, ipflow);
                         1
                     } else {
-                        debug!("no proxy tcp flow: {:?}", ipflow);
+                        debug!("{} no proxy tcp flow: {:?}", rxq1, ipflow);
                         0
                     }
                 } else {
-                    debug!("ignored by proxy: not a tcp flow or not addressed to proxy");
+                    debug!(
+                        "{} ignored by proxy: not a tcp flow or not addressed to proxy",
+                        rxq1
+                    );
                     0
                 }
             }
@@ -820,13 +831,13 @@ pub fn setup_forwarder<S, F1, F2>(
                 } 
                 else if hs.tcp.ack_flag() && c.c_state == TcpState::SynSent {
                     c.c_state=TcpState::Established;
-                    debug!("client side connection established for {:?}", hs_flow.src_socket_addr());
+                    debug!("{} client side connection established for {:?}", rxq2, hs_flow.src_socket_addr());
                 }
                 else if hs.tcp.ack_flag() && c.s_state == TcpState::FinWait {
                     c.c_state = TcpState::CloseWait;
                     c.s_state = TcpState::Closed; 
                     if hs.tcp.fin_flag() { c.c_state = TcpState::LastAck }
-                    debug!("transition to client/server state {:?}/{:?}", c.c_state, c.s_state);                                       
+                    debug!("{} transition to client/server state {:?}/{:?}", rxq2, c.c_state, c.s_state);                                       
                 }
                 else if c.s_state==TcpState::LastAck && hs.tcp.ack_flag() {
                     // received final ack from client for client initiated close
@@ -865,8 +876,8 @@ pub fn setup_forwarder<S, F1, F2>(
                     group_index= 1; 
                 }  
                 else if c.s_state < TcpState::Established || c.c_state < TcpState::Established {
-                    warn!("unexpected client-side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
-                        hs.tcp.src_port(), c.proxy_sport, c.c_state, c.s_state,
+                    warn!("{} unexpected client-side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
+                        rxq2, hs.tcp.src_port(), c.proxy_sport, c.c_state, c.s_state,
                     );
                     group_index= 2;
                 }           
@@ -930,8 +941,8 @@ pub fn setup_forwarder<S, F1, F2>(
                         }
                          
                         if b_unexpected {
-                            warn!("unexpected server side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
-                                hs.tcp.dst_port(), c.client_sock.port(), c.c_state, c.s_state,
+                            warn!("{} unexpected server side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
+                                rxq2, hs.tcp.dst_port(), c.client_sock.port(), c.c_state, c.s_state,
                             );
                             group_index= 2;
                         }

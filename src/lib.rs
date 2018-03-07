@@ -40,11 +40,12 @@ mod tests {
     use e2d2::interface::*;
     use e2d2::allocators::CacheAligned;
     use e2d2::headers::MacAddress;
+    use e2d2::native::zcsi::*;
 
     use nftcp::*;
 
     const CONVERSION_FACTOR: f64 = 1000000000.;
-    const KNI_NAME: &'static str = "vEth1"; //TODO use name from the argument list
+    const KNI_NAME: &'static str = "vEth1_0"; //TODO use name from the argument list
     const KNI_NETNS: &'static str = "nskni";
 
     /// mac and IP address to assign to Linux KNI interface, i.e. the proxyengine
@@ -227,8 +228,14 @@ mod tests {
 
     #[test]
     fn delayed_binding_proxy() {
+        env_logger::init().unwrap();
+        info!("Testing ProxyEngine ..");
 
-        let timeout = Duration::from_millis(500 as u64);
+        unsafe {
+            rte_log_set_global_level(RteLogLevel::RteLogDebug);
+            info!("dpdk log level: {}", rte_log_get_global_level());
+        }
+        let timeout = Duration::from_millis(1000 as u64);
 
         fn am_root() -> bool {
             match env::var("USER") {
@@ -237,8 +244,7 @@ mod tests {
             }
         }
 
-        env_logger::init().unwrap();
-        info!("Testing ProxyEngine ...");
+
         if !am_root() {
             error!(" ... must run as root, e.g.: sudo -E env \"PATH=$PATH\" cargo test");
             std::process::exit(1);
@@ -254,32 +260,8 @@ mod tests {
         let mut opts = basic_opts();
         opts.optflag("t", "test", "Test mode do not use real ports");
 
-        // for use of --vdev with KNI PMD, see https://dpdk.org/doc/guides/nics/kni.html
-        let args: Vec<String> = vec![
-            "proxyengine",
-            "-f",
-            "proxy.toml" /*
-            "-m",
-            "0",
-            "-c",
-            "1",
-            //"-c",
-            //"2",
-            "-c",
-            "1",
-            "-p",
-            "13:00.0",
-            //"-p",
-            //"13:00.0", // driver vmxnet3 needs at least room for 512 descriptors
-            "-p",
-            "kni:1",
-            "-n",
-            "proxyengine",
-            "--primary",
-            "--vdev",
-            "net_kni0",
-            */,
-        ].iter()
+        let args: Vec<String> = vec!["proxyengine", "-f", "proxy.toml"]
+            .iter()
             .map(|x| x.to_string())
             .collect::<Vec<String>>();
         let matches = match opts.parse(&args[1..]) {
@@ -363,8 +345,8 @@ mod tests {
                     }
                 });
 
-                thread::sleep(Duration::from_millis(100 as u64)); // wait for the listeners
-
+                thread::sleep(Duration::from_millis(1000 as u64)); // wait for the listeners
+                //for i in (0..10) {
                 // create a first test connection
                 if let Ok(mut stream1) = TcpStream::connect_timeout(
                     &SocketAddr::from((
@@ -426,7 +408,7 @@ mod tests {
                 } else {
                     panic!("second test connection: 3-way handshake with proxy failed");
                 }
-
+                //}
                 debug!("main thread goes sleeping ...");
                 thread::sleep(Duration::from_millis(2000 as u64)); // Sleep for a bit
                 debug!("main thread awake again");
