@@ -16,9 +16,9 @@ pub mod nftcp;
 mod tests {
 
     extern crate ctrlc;
+    extern crate ipnet;
     extern crate std;
     extern crate time;
-    extern crate ipnet;
 
     use env_logger;
     use std::sync::Arc;
@@ -31,15 +31,21 @@ mod tests {
 
     use self::ipnet::Ipv4Net;
     use std::net::Ipv4Addr;
-    use std::net::{TcpStream, TcpListener, SocketAddr};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::io::Write;
     use std::io::Read;
+    use std::fs;
+    use std::path::Path;
+
+    use rand;
+    use rand::distributions::{Sample, Range};
+    use log;
 
     use e2d2::config::{basic_opts, read_matches};
     use e2d2::scheduler::*;
     use e2d2::interface::*;
     use e2d2::allocators::CacheAligned;
-    use e2d2::headers::MacAddress;
+    use e2d2::headers::{MacAddress, ParseError};
     use e2d2::native::zcsi::*;
 
     use nftcp::*;
@@ -51,15 +57,22 @@ mod tests {
     /// mac and IP address to assign to Linux KNI interface, i.e. the proxyengine
     const KNI_MAC: &'static str = "8e:f7:35:7e:73:91";
     const PROXY_IP: &'static str = "192.168.222.1/24";
-    const PROXY_CPORT: u16 = 389;
+    const PROXY_CPORT: u16 = 999;
 
+    // only for test:
+    const LINUX_IFACE: &'static str = "enp7s0f1";
+    const TARGET_IP: &'static str = "192.168.222.3";
+    const TARGET_PORT_BASE: u16 = 0xE000;
+
+    /* not necessary for test
     const TARGET_IP1: &'static str = "192.168.222.3";
     const TARGET_PORT1: u16 = 54321;
-    const TARGET_MAC1: &'static str = "00:0c:29:64:43:a2"; //TODO get this from linux, but maybe mac of gw
+    const TARGET_MAC1: &'static str = "a0:36:9f:82:9c:fe"; //TODO get this from linux, but maybe mac of gw
 
     const TARGET_IP2: &'static str = "192.168.222.3";
     const TARGET_PORT2: u16 = 54322;
-    const TARGET_MAC2: &'static str = "00:0c:29:64:43:a2"; //TODO get this from linux, but maybe mac of gw
+    const TARGET_MAC2: &'static str = "a0:36:9f:82:9c:fe"; //TODO get this from linux, but maybe mac of gw
+    */
 
     #[derive(Debug, Clone)]
 
@@ -111,7 +124,11 @@ mod tests {
         }
     }
 
-    pub fn setup_pipelines<S>(ports: HashSet<CacheAligned<PortQueue>>, sched: &mut S)
+    pub fn setup_pipelines<S>(
+        core: i32,
+        ports: HashSet<CacheAligned<PortQueue>>,
+        sched: &mut S,
+        target_port: u16)
     where
         S: Scheduler + Sized,
     {
@@ -119,7 +136,8 @@ mod tests {
         let mut pci: Option<&CacheAligned<PortQueue>> = None;
         for port in &ports {
             debug!(
-                "setup_pipelines: port {} --  {} rxq {} txq {}",
+                "setup_pipeline on core {}: port {} --  {} rxq {} txq {}",
+                core,
                 port.port,
                 port.port.mac_address(),
                 port.rxq(),
@@ -145,7 +163,9 @@ mod tests {
 
         if is_kni_core(pci.unwrap()) {
             sched
-                .add_task(KniHandleRequest { kni_port: kni.unwrap().port.clone() })
+                .add_task(KniHandleRequest {
+                    kni_port: kni.unwrap().port.clone(),
+                })
                 .unwrap();
         }
 
@@ -156,15 +176,15 @@ mod tests {
         };
 
         let server_1 = L234Data {
-            mac: MacAddress::parse_str(TARGET_MAC1).unwrap(),
-            ip: u32::from(TARGET_IP1.parse::<Ipv4Addr>().unwrap()),
-            port: TARGET_PORT1,
+            mac: get_mac_from_ifname(LINUX_IFACE).unwrap(),
+            ip: u32::from(TARGET_IP.parse::<Ipv4Addr>().unwrap()),
+            port: target_port,
         };
 
         let server_2 = L234Data {
-            mac: MacAddress::parse_str(TARGET_MAC2).unwrap(),
-            ip: u32::from(TARGET_IP2.parse::<Ipv4Addr>().unwrap()),
-            port: TARGET_PORT2,
+            mac: get_mac_from_ifname(LINUX_IFACE).unwrap(),
+            ip: u32::from(TARGET_IP.parse::<Ipv4Addr>().unwrap()),
+            port: target_port+1,
         };
 
         debug!("server_macs = 1->{} 2->{}", server_1.mac, server_2.mac);
@@ -183,9 +203,7 @@ mod tests {
             } else {
                 c.userdata = Some(Container::new());
             }
-
         };
-
 
         let f_process_payload_c_s = |c: &mut Connection, payload: &mut [u8], tailroom: usize| {
             /*
@@ -213,27 +231,44 @@ mod tests {
         };
 
         setup_forwarder(
+            core,
             pci.unwrap(),
             kni.unwrap(),
             sched,
             proxy_data,
             f_select_server,
             f_process_payload_c_s,
-    //        u32::from(CLIENT_IP.parse::<Ipv4Addr>().unwrap()),
-    //        MacAddress::parse_str(CLIENT_MAC).unwrap(),
+            //        u32::from(CLIENT_IP.parse::<Ipv4Addr>().unwrap()),
+            //        MacAddress::parse_str(CLIENT_MAC).unwrap(),
         );
     }
 
-
+    fn get_mac_from_ifname(ifname: &str) -> Result<MacAddress, ParseError> {
+        let iface = Path::new("/sys/class/net").join(ifname).join("address");
+        /*
+        let mut f = fs::File::open(iface).unwrap();
+        f.read_to_string(&mut macaddr).unwrap();
+        MacAddress::parse_str(&macaddr)
+        */
+        let mut macaddr = String::new();
+        fs::File::open(iface).map_err(|e| ParseError::IOError(e)).and_then(|mut f| {
+            f.read_to_string(&mut macaddr)
+                .map_err(|e| ParseError::IOError(e))
+                .and_then(|_| MacAddress::parse_str(&macaddr.lines().next().unwrap()))
+        })
+    }
 
     #[test]
     fn delayed_binding_proxy() {
-        env_logger::init().unwrap();
+        env_logger::init();
         info!("Testing ProxyEngine ..");
 
+        let log_level_rte= if log_enabled!(log::Level::Debug) { RteLogLevel::RteLogDebug } else { RteLogLevel::RteLogInfo};
         unsafe {
-            rte_log_set_global_level(RteLogLevel::RteLogDebug);
-            info!("dpdk log level: {}", rte_log_get_global_level());
+            rte_log_set_global_level(log_level_rte);
+            rte_log_set_level(RteLogtype::RteLogtypePmd, log_level_rte);
+            info!("dpdk log global level: {}", rte_log_get_global_level());
+            info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
         }
         let timeout = Duration::from_millis(1000 as u64);
 
@@ -244,9 +279,8 @@ mod tests {
             }
         }
 
-
         if !am_root() {
-            error!(" ... must run as root, e.g.: sudo -E env \"PATH=$PATH\" cargo test");
+            error!(" ... must run as root, e.g.: sudo -E env \"PATH=$PATH\" $executable, see also test.sh");
             std::process::exit(1);
         }
 
@@ -286,25 +320,23 @@ mod tests {
                     );
                 }
 
+                let mut rng = rand::thread_rng();
+                let mut between = Range::new(TARGET_PORT_BASE, 0xFFFF);
+                let target_port = between.sample(&mut rng);
                 if b_phy_ports {
-                    context.add_pipeline_to_run(
-                        Arc::new(move |p: HashSet<CacheAligned<PortQueue>>,
-                              s: &mut StandaloneScheduler| {
-                            setup_pipelines(p, s)
-                        }),
-                    );
+                    context.add_pipeline_to_run(Arc::new(
+                        move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler|
+                            setup_pipelines(core, p, s, target_port),
+                    ));
                 }
-
-
                 context.execute();
-
                 setup_kni(KNI_NAME, PROXY_IP, KNI_MAC, KNI_NETNS);
 
-
-                thread::spawn(|| {
+                let target_port_copy = target_port; // moved into thread
+                thread::spawn(move || {
                     let listener1: TcpListener;
-                    if let Ok(listener1) = TcpListener::bind((TARGET_IP1, TARGET_PORT1)) {
-                        debug!("bound first TcpListener to {}:{}", TARGET_IP1, TARGET_PORT1);
+                    if let Ok(listener1) = TcpListener::bind((TARGET_IP, target_port_copy)) {
+                        debug!("bound first TcpListener to {}:{}", TARGET_IP, target_port_copy);
                         for stream in listener1.incoming() {
                             let mut stream = stream.unwrap();
                             let mut buf = [0u8; 16];
@@ -313,22 +345,15 @@ mod tests {
                             stream.write(&[11u8]);
                         }
                     } else {
-                        panic!(
-                            "failed to bind first TcpListener to {}:{}",
-                            TARGET_IP1,
-                            TARGET_PORT1
-                        );
+                        panic!("failed to bind first TcpListener to {}:{}", TARGET_IP, target_port_copy);
                     }
                 });
 
-                thread::spawn(|| {
+                let target_port_copy = target_port; // moved into thread
+                thread::spawn(move || {
                     let listener2: TcpListener;
-                    if let Ok(listener2) = TcpListener::bind((TARGET_IP2, TARGET_PORT2)) {
-                        debug!(
-                            "bound second TcpListener to {}:{}",
-                            TARGET_IP2,
-                            TARGET_PORT2
-                        );
+                    if let Ok(listener2) = TcpListener::bind((TARGET_IP, target_port_copy + 1u16)) {
+                        debug!("bound second TcpListener to {}:{}", TARGET_IP, target_port_copy + 1u16);
                         for stream in listener2.incoming() {
                             let mut stream = stream.unwrap();
                             let mut buf = [0u8; 16];
@@ -337,78 +362,43 @@ mod tests {
                             stream.write(&[12u8]);
                         }
                     } else {
-                        panic!(
-                            "failed to bind second TcpListener to {}:{}",
-                            TARGET_IP2,
-                            TARGET_PORT2
-                        );
+                        panic!("failed to bind second TcpListener to {}:{}", TARGET_IP, target_port_copy + 1u16);
                     }
                 });
 
-                thread::sleep(Duration::from_millis(1000 as u64)); // wait for the listeners
-                //for i in (0..10) {
-                // create a first test connection
-                if let Ok(mut stream1) = TcpStream::connect_timeout(
-                    &SocketAddr::from((
-                        PROXY_IP.parse::<Ipv4Net>().unwrap().addr(),
-                        PROXY_CPORT,
-                    )),
-                    timeout,
-                )
-                {
-                    debug!("first test connection: TCP connect to proxy successful");
-                    stream1.set_write_timeout(Some(timeout));
-                    stream1.set_read_timeout(Some(timeout));
-                    if let Ok(_) = stream1.write(&[1u8]) {
-                        debug!("success in writing to first test connection");
-                        let mut buf = [0u8; 16];
-                        if let Ok(_) = stream1.read(&mut buf[..]) {
-                            if buf[0] == 11u8 {
-                                info!("reply on first connection is ok!");
+                thread::sleep(Duration::from_millis(2000 as u64)); // wait for the listeners
+                // start setting up and releasing TCP connections
+                let mut data= Range::new(1u8,3u8);
+                for ntry in 1..100 {
+                    if let Ok(mut stream) = TcpStream::connect_timeout(
+                        &SocketAddr::from((PROXY_IP.parse::<Ipv4Net>().unwrap().addr(), PROXY_CPORT)),
+                        timeout,
+                    ) {
+                        debug!("test connection {}: TCP connect to proxy successful", ntry);
+                        stream.set_write_timeout(Some(timeout));
+                        stream.set_read_timeout(Some(timeout));
+                        let mut query:u8=data.sample(&mut rng);
+                        if let Ok(_) = stream.write(&[query]) {
+                            debug!("success in writing to test connection {}", ntry);
+                            let mut buf = [0u8; 16];
+                            if let Ok(_) = stream.read(&mut buf[..]) {
+                                if query == 1u8 && buf[0] == 11u8 || query == 2u8 && buf[0] == 12u8 {
+                                    info!("reply on connection {} is ok!", ntry);
+                                } else {
+                                    panic!("wrong reply on connection {}", ntry);
+                                }
                             } else {
-                                panic!("wrong reply on first connection");
-                            }
+                                panic!("timeout on connection {} while waiting for answer", ntry);
+                            };
                         } else {
-                            panic!("timeout on first connection while waiting for answer");
-                        };
+                            panic!("error when writing to test connection {}", ntry);
+                        }
                     } else {
-                        panic!("error when writing to first test connection");
+                        panic!("test connection {}: 3-way handshake with proxy failed", ntry);
                     }
-                } else {
-                    panic!("first test connection: 3-way handshake with proxy failed");
                 }
 
-                // create a second test connection
-                if let Ok(mut stream2) = TcpStream::connect_timeout(
-                    &SocketAddr::from((
-                        PROXY_IP.parse::<Ipv4Net>().unwrap().addr(),
-                        PROXY_CPORT,
-                    )),
-                    timeout,
-                )
-                {
-                    debug!("second test connection: TCP connect to proxy successful");
-                    stream2.set_write_timeout(Some(timeout));
-                    stream2.set_read_timeout(Some(timeout));
-                    if let Ok(_) = stream2.write(&[2u8]) {
-                        debug!("success in writing to second test connection");
-                        let mut buf = [0u8; 16];
-                        if let Ok(_) = stream2.read(&mut buf[..]) {
-                            if buf[0] == 12u8 {
-                                info!("reply on second connection is ok!");
-                            } else {
-                                panic!("wrong reply on second connection");
-                            }
-                        } else {
-                            panic!("timeout on second connection while waiting for answer");
-                        };
-                    } else {
-                        panic!("error when writing to second test connection");
-                    }
-                } else {
-                    panic!("second test connection: 3-way handshake with proxy failed");
-                }
-                //}
+
                 debug!("main thread goes sleeping ...");
                 thread::sleep(Duration::from_millis(2000 as u64)); // Sleep for a bit
                 debug!("main thread awake again");

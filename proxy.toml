@@ -6,7 +6,7 @@ pool_size   = 2048              # default 2048
 cache_size  = 32                # default 32
 cores       = [ 1, 2 ]
 ports       = [ 
-                    { name="13:00.0", rxd= 512, txd= 512, cores = [1, 2] } ,
+                    { name="7:00.0", rxd= 512, txd= 512, cores = [1, 2] } ,
                     { name="kni:1", rxd=64, txd=64, cores = [1], k_cores = [1] }
               ] 
 vdev        = [ "net_kni0" ]    # for use of vdev with KNI PMD, see https://dpdk.org/doc/guides/nics/kni.html
