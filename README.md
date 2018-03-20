@@ -3,7 +3,7 @@ _**ProxyEngine Overview**_
 ProxyEngine is a user-space TCP-proxy written in Rust with following properties
 * TCP pass-through
 * customizable delayed binding
-* high performance due to multi-core support and receive side scaling (RSS)
+* high performance: multi-core, receive side scaling (RSS) by NIC, receive flow steering (RFS) by NIC, shared nothing architecture
 * customizable payload inspection and manipulation
 
 It may be used for intelligent load-balancing and fire-walling of TCP based protocols, e.g. LDAP. Late binding allows to select the target server not till the first payload packet after the initial three-way hand-shake is received. In addition callbacks can be defined by which the proxy can modify the payload of the TCP based protocol. For this purpose additional connection state is maintained by the ProxyEngine.
@@ -18,14 +18,16 @@ Note, that a local installation of NetBricks is necessary as it includes DPDK an
 
 ProxyEngine includes a test module. However for using this module, the network interfaces of the test machine need to be prepared (see [prepNet.sh](https://github.com/silverengine-de/proxyengine/blob/master/prepNet.sh)). 
 
-First a network interface for user-space DPDK is needed. This interface is used by the proxy to connect to clients and servers (in the example code this interface uses PCI slot 13:00.0). The current code is tested with virtual interface driver vmxnet3 and previous single rx/tx versions with e1000e.
+First a network interface for user-space DPDK is needed. This interface is used by the proxy to connect to clients and servers (in the example code this interface uses PCI slot xx:00.0). The latest code is tested with X520-DA2 (82599) and previous single rx/tx versions with e1000e and vmxnet3.
 
-Secondly an extra Linux interface is required which is used by the test module for placing client and server stacks (in the example code ens192).
-Both interfaces must be connected to a bridge, e.g. a host-only network of the hypervisor. Using Wireshark on this network allows us to observe the complete traffic exchange between clients, the proxy and the servers.
+Secondly an extra Linux interface is required which is used by the test module for placing client and server stacks.
 
-In addition some constants like the Linux interface name and the IP / MAC addresses in the test module code need to be adapted. 
+Both interfaces must be interconnected. In case of virtual interfaces, e.g. interfaces may be connected to a host-only network of the hypervisor. Using Wireshark on this network allows us to observe the complete traffic exchange between clients, the proxy and the servers. In case of physical interfaces, interfaces my be connected by a cross over cable.
 
-ProxyEngine is so far tested on a virtual machine running Fedora 27 on a Windows 7 host.
+In addition some constants like the Linux interface name (LINUX_IFACE) and the IP / MAC addresses (e.g. KNI_MAC, PROXY_IP, TARGET_IP) in the test module code need to be adapted. 
+
+Latest code of ProxyEngine is tested on a 2-socket NUMA server, each socket hosting 4 physical cores, running Centos 7.4.
+
 
 _**ProxyEngine Test Configuration**_
 
