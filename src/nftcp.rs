@@ -2,7 +2,7 @@ use e2d2::operators::*;
 use e2d2::scheduler::*;
 use e2d2::allocators::CacheAligned;
 use e2d2::native::zcsi::rte_kni_handle_request;
-use e2d2::headers::{IpHeader, MacAddress, MacHeader, TcpHeader};
+use e2d2::headers::{IpHeader, MacHeader, TcpHeader};
 use e2d2::interface::*;
 use e2d2::utils::{finalize_checksum, ipv4_extract_flow};
 use e2d2::queues::{new_mpsc_queue_pair, MpscProducer};
@@ -18,6 +18,7 @@ use std::any::Any;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
 
+use eui48::MacAddress;
 use rand;
 
 const TCP_PORT_MASK: u16 = 0xFC00;
@@ -141,7 +142,6 @@ struct ConnectionManager {
     //port2con: Box<[Option(Arc<Connection>); (65535 - PROXY_PORT_MIN + 1) as usize]>
     pci: CacheAligned<PortQueue>, // the PortQueue for which connections are managed
     proxy_data: L234Data,
-    manager_id: u16,
     tcp_port_base: u16,
     tcp_port_mask: u16,
 }
@@ -182,7 +182,6 @@ impl ConnectionManager {
             free_ports: (tcp_port_base..max_tcp_port).collect(),
             pci,
             proxy_data,
-            manager_id: old_manager_count,
             tcp_port_base,
             tcp_port_mask: TCP_PORT_MASK,
         };
@@ -203,10 +202,10 @@ impl ConnectionManager {
         tcp_port & self.tcp_port_mask == self.tcp_port_base
     }
 
-    fn tcp_port_base(&self) -> u16 { self.tcp_port_base }
-    fn tcp_port_mask(&self) -> u16 { self.tcp_port_mask }
+    //fn tcp_port_base(&self) -> u16 { self.tcp_port_base }
+    //fn tcp_port_mask(&self) -> u16 { self.tcp_port_mask }
 
-    fn get(&self, key: &CKey) -> Option<&Connection> {
+    /*fn get(&self, key: &CKey) -> Option<&Connection> {
         match *key {
             CKey::Port(p) => {
                 if self.owns_tcp_port(p) {
@@ -225,7 +224,7 @@ impl ConnectionManager {
             }
         }
     }
-
+    */
     fn get_mut(&mut self, key: CKey) -> Option<&mut Connection> {
         match key {
             CKey::Port(p) => {
@@ -306,14 +305,14 @@ impl ConnectionManager {
             }
         }
     }
-
+/*
     fn release(&mut self, c: &mut Connection) {
         self.free_ports.push_back(c.proxy_sport);
         let port = self.sock2port.remove(&c.client_sock);
         assert!(port.unwrap() == c.proxy_sport);
         c.proxy_sport = 0;
     }
-
+*/
     fn release_port(&mut self, proxy_port: u16) {
         if let Some(c) = self.port2con.get_mut(&proxy_port) {
             self.free_ports.push_back(proxy_port);
@@ -439,7 +438,7 @@ pub fn setup_forwarder<S, F1, F2>(
     F1: Fn(&mut Connection) + Sized + Send + 'static,
     F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + 'static,
 {
-    debug!("enter setup_forwarder for core {} and port {} with queue {}", core, pci.port.port_id(), pci.rxq());
+    debug!("enter setup_forwarder for core {}, port {} with rxq {}", core, pci.port.port_id(), pci.rxq());
 
     let mut sm = ConnectionManager::new(pci.clone(), pd.clone());
 /* so far we are using the ntuple filter, which does not support non-trivial masks
@@ -647,7 +646,7 @@ pub fn setup_forwarder<S, F1, F2>(
 
             fn server_to_client<M: Sized + Send>(
                 // we will need p once s->c payload inspection is required
-                p: &mut Packet<TcpHeader, M>,
+                _p: &mut Packet<TcpHeader, M>,
                 c: &mut Connection,
                 h: &mut HeaderState,
                 pd: &L234Data,
@@ -708,8 +707,6 @@ pub fn setup_forwarder<S, F1, F2>(
                 }
                 // create a SYN Packet from the current packet
                 // remove payload
-
-                debug!("select_server:  payload_sz= {}", payload_sz);
                 h.ip.trim_length_by(payload_sz as u16);
 
                 // 60 is the minimum data length (4 bytes FCS not included)
@@ -765,8 +762,8 @@ pub fn setup_forwarder<S, F1, F2>(
                         let h_tcp = delayed_p.get_mut_header();
                         h_tcp.set_psh_flag();
                     }
-                    let n_padding_bytes = MIN_FRAME_SIZE - delayed_p.data_len();
-                    if n_padding_bytes > 0 {
+                    if delayed_p.data_len() < MIN_FRAME_SIZE {
+                        let n_padding_bytes = MIN_FRAME_SIZE - delayed_p.data_len();
                         debug!("padding with {} 0x0 bytes", n_padding_bytes);
                         delayed_p.add_padding(n_padding_bytes);
                     }
@@ -879,7 +876,6 @@ pub fn setup_forwarder<S, F1, F2>(
                     }
                 } else if c.c_state == TcpState::Established && c.s_state == TcpState::Listen {
                     // should be the first payload packet from client
-                    debug!("selecting server after 3 way handshake");
                     select_server(p, &mut c, &mut hs, &pd, &f_select_server);
                     c.s_state = TcpState::SynReceived;
                     group_index = 1;
