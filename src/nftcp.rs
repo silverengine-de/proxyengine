@@ -7,7 +7,6 @@ use e2d2::interface::*;
 use e2d2::utils::{finalize_checksum, ipv4_extract_flow};
 use e2d2::queues::{new_mpsc_queue_pair, MpscProducer};
 use e2d2::headers::EndOffset;
-use e2d2::utils::FiveTupleV4;
 
 use std::sync::Arc;
 use std::cmp::min;
@@ -21,7 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
 use eui48::MacAddress;
 use rand;
 
-const TCP_PORT_MASK: u16 = 0xFC00;
+//const TCP_PORT_MASK: u16 = 0xFC00;
 const MIN_FRAME_SIZE: usize = 60; // without fcs
 
 use fnv::FnvHasher;
@@ -82,7 +81,7 @@ impl PartialEq for CKey {
 
 pub struct Connection {
     pub payload: Box<Vec<u8>>,
-    client_sock: SocketAddrV4,
+    pub client_sock: SocketAddrV4,
     pub server: Option<L234Data>,
     pub userdata: Option<Box<UserData>>,
     //Box makes the trait object sizeable
@@ -139,17 +138,11 @@ struct ConnectionManager {
     sock2port: HashMap<SocketAddrV4, u16, FnvHash>,
     free_ports: VecDeque<u16>,
     port2con: HashMap<u16, Connection, FnvHash>,
-    //port2con: Box<[Option(Arc<Connection>); (65535 - PROXY_PORT_MIN + 1) as usize]>
     pci: CacheAligned<PortQueue>, // the PortQueue for which connections are managed
-    proxy_data: L234Data,
     tcp_port_base: u16,
-    tcp_port_mask: u16,
 }
 
-fn get_tcp_port_base_by_id(manager_id: u16) -> u16 {
-    TCP_PORT_MASK-manager_id*(!TCP_PORT_MASK + 1)
-}
-
+/* works with individual 5tuples which does not scale
 fn program_rxflow_into_nic(pci: &CacheAligned<PortQueue>, dst_ip: u32, tcp_dst_port: u16) {
     let flow: FiveTupleV4 = FiveTupleV4 {
         src_ip: 0u32,
@@ -168,22 +161,30 @@ fn program_rxflow_into_nic(pci: &CacheAligned<PortQueue>, dst_ip: u32, tcp_dst_p
     };
 
     pci.port.map_rx_flow_2_queue(pci.rxq() as u16, flow, flow_mask  );
-	
 }
+*/
+
+fn get_tcp_port_base_by_manager_count(pci: &CacheAligned<PortQueue>, count: u16) -> u16 {
+    let port_mask= pci.port.get_tcp_dst_port_mask();
+    debug!("port_mask= {}", port_mask);
+    port_mask - count * (!port_mask +1)
+}
+
 
 impl ConnectionManager {
     fn new(pci: CacheAligned<PortQueue>, proxy_data: L234Data) -> ConnectionManager {
         let old_manager_count: u16 = GLOBAL_MANAGER_COUNT.fetch_add(1, Ordering::SeqCst) as u16;
-        let tcp_port_base: u16 = get_tcp_port_base_by_id(old_manager_count);
-        let max_tcp_port: u16 = tcp_port_base+!TCP_PORT_MASK;
+        let port_mask= pci.port.get_tcp_dst_port_mask();
+        let tcp_port_base: u16 = get_tcp_port_base_by_manager_count(&pci, old_manager_count);
+        let max_tcp_port: u16 = tcp_port_base+!port_mask;
+        // program the NIC to send all flows for our owned ports to our rx queue
+        pci.port.add_fdir_filter(pci.rxq() as u16, proxy_data.ip, tcp_port_base).unwrap();
         let mut cm = ConnectionManager {
             sock2port: HashMap::<SocketAddrV4, u16, FnvHash>::with_hasher(Default::default()),
             port2con: HashMap::<u16, Connection, FnvHash>::with_hasher(Default::default()),
             free_ports: (tcp_port_base..max_tcp_port).collect(),
             pci,
-            proxy_data,
             tcp_port_base,
-            tcp_port_mask: TCP_PORT_MASK,
         };
         // need to add last port this way to avoid overflow with slice, when max_tcp_port == 65535
         cm.free_ports.push_back(max_tcp_port);
@@ -198,8 +199,9 @@ impl ConnectionManager {
         cm
     }
 
+
     fn owns_tcp_port(&self, tcp_port: u16) -> bool {
-        tcp_port & self.tcp_port_mask == self.tcp_port_base
+        tcp_port & self.pci.port.get_tcp_dst_port_mask() == self.tcp_port_base
     }
 
     //fn tcp_port_base(&self) -> u16 { self.tcp_port_base }
@@ -289,7 +291,8 @@ impl ConnectionManager {
                         let mut cc = Connection::default();
                         cc.client_sock = s;
                         c = Some(cc);
-                        program_rxflow_into_nic(&self.pci, self.proxy_data.ip, port);
+                        // program an individual flow
+                        // program_rxflow_into_nic(&self.pci, self.proxy_data.ip, port);
                     };
                     if c.is_some() {
                         let mut c = c.unwrap();
@@ -431,12 +434,12 @@ pub fn setup_forwarder<S, F1, F2>(
     kni: &CacheAligned<PortQueue>,
     sched: &mut S,
     pd: L234Data,
-    f_select_server: F1,
-    f_process_payload_c_s: F2,
+    f_select_server: Arc<F1>,
+    f_process_payload_c_s: Arc<F2>,
 ) where
     S: Scheduler + Sized,
-    F1: Fn(&mut Connection) + Sized + Send + 'static,
-    F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + 'static,
+    F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
+    F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + Sync + 'static,
 {
     debug!("enter setup_forwarder for core {}, port {} with rxq {}", core, pci.port.port_id(), pci.rxq());
 
@@ -493,6 +496,7 @@ pub fn setup_forwarder<S, F1, F2>(
         }
     });
 
+    let tcp_min_port=get_tcp_port_base_by_manager_count(pci, GLOBAL_MANAGER_COUNT.load(Ordering::Relaxed) as u16);
     // group the traffic into TCP traffic addressed to Proxy (group 1),
     // and send all other traffic to KNI (group 0)
     let mut l2groups = l2filter_from_pci.group_by(
@@ -507,7 +511,7 @@ pub fn setup_forwarder<S, F1, F2>(
                 let ipflow = ipflow.unwrap();
                 if ipflow.dst_ip == pd.ip && ipflow.proto == 6 {
                     if ipflow.dst_port == pd.port
-                        || ipflow.dst_port >= get_tcp_port_base_by_id(GLOBAL_MANAGER_COUNT.load(Ordering::Relaxed) as u16)
+                        || ipflow.dst_port >= tcp_min_port
                     {
                         debug!("{} proxy tcp flow: {}", thread_id_1, ipflow);
                         1
@@ -615,7 +619,7 @@ pub fn setup_forwarder<S, F1, F2>(
                 c: &mut Connection,
                 h: &mut HeaderState,
                 pd: &L234Data,
-                f_process_payload: F,
+                f_process_payload: &Arc<F>,
             ) where
                 F: Fn(&mut Connection, &mut [u8], usize),
             {
@@ -693,7 +697,7 @@ pub fn setup_forwarder<S, F1, F2>(
                 c: &mut Connection,
                 h: &mut HeaderState,
                 pd: &L234Data,
-                f_select_server: &F,
+                f_select_server: &Arc<F>,
             ) where
                 F: Fn(&mut Connection),
             {

@@ -12,11 +12,11 @@ ProxyEngine builds on [Netbricks](https://github.com/NetSys/NetBricks) which its
 
 _**ProxyEngine Installation**_
 
-First install NetBricks. ProxyEngine needs the branch e2d2-0-1-1 from the fork at https://github.com/rstade/Netbricks. Install the branch locally on your (virtual) machine by following the description of NetBricks. The (relative) installation path of e2d2 needs to be updated in the dependency section of Cargo.toml for the ProxyEngine. 
+First install NetBricks. ProxyEngine needs the branch e2d2-0-1-1 from the fork at https://github.com/rstade/Netbricks. Usually there has been a commit of the NetBricks fork together with that of ProxyEngine. Install the branch locally on your (virtual) machine by following the description of NetBricks. The (relative) installation path of e2d2 needs to be updated in the dependency section of Cargo.toml for the ProxyEngine. 
 
 Note, that a local installation of NetBricks is necessary as it includes DPDK and some C-libraries for interfacing the Rust code of NetBricks with the DPDK. As we need DPDK kernel modules, DPDK needs to be re-compiled each time the kernel version changes. This can be done with the script [build.sh](https://github.com/rstade/NetBricks/blob/e2d2-0-1-1/build.sh) of NetBricks. Note also that the Linux linker _ld_ needs to be made aware of the location of the .so libraries created by NetBricks. This can be solved using _ldconfig_.
 
-ProxyEngine includes a test module. However for using this module, the network interfaces of the test machine need to be prepared (see [prepNet.sh](https://github.com/silverengine-de/proxyengine/blob/master/prepNet.sh)). 
+ProxyEngine includes a main program bin.rs (using example configuration proxy_run.toml) and a test module (using configuration proxy.toml). For both the network interfaces of the test machine need to be prepared (see [prepNet.sh](https://github.com/silverengine-de/proxyengine/blob/master/prepNet.sh)). 
 
 First a network interface for user-space DPDK is needed. This interface is used by the proxy to connect to clients and servers (in the example configuration this interface uses PCI slot 07:00.0). The latest code is tested with X520-DA2 (82599) and previous single rx/tx versions with e1000e and vmxnet3.
 
