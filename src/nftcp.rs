@@ -15,12 +15,14 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::collections::{HashMap, VecDeque};
 use std::any::Any;
 use std::process::Command;
+use std::sync::mpsc::Sender;
 use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
 
 use eui48::MacAddress;
 use rand;
 
-//const TCP_PORT_MASK: u16 = 0xFC00;
+use channel::*;
+
 const MIN_FRAME_SIZE: usize = 60; // without fcs
 
 use fnv::FnvHasher;
@@ -134,35 +136,16 @@ impl Default for Connection {
 
 static GLOBAL_MANAGER_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
 
+
+
 struct ConnectionManager {
     sock2port: HashMap<SocketAddrV4, u16, FnvHash>,
     free_ports: VecDeque<u16>,
     port2con: HashMap<u16, Connection, FnvHash>,
     pci: CacheAligned<PortQueue>, // the PortQueue for which connections are managed
+    c_statistics: Arc< ConnectionStatistics>,
     tcp_port_base: u16,
 }
-
-/* works with individual 5tuples which does not scale
-fn program_rxflow_into_nic(pci: &CacheAligned<PortQueue>, dst_ip: u32, tcp_dst_port: u16) {
-    let flow: FiveTupleV4 = FiveTupleV4 {
-        src_ip: 0u32,
-        dst_ip: dst_ip,
-        src_port: 0u16,
-        dst_port: tcp_dst_port,
-        proto: 0x06, // TCP
-    };
-
-    let flow_mask= FiveTupleV4 {
-        src_ip: 0u32,
-        dst_ip: 0xFFFFFFFF,
-        src_port: 0u16,
-        dst_port: 0xFFFF,
-        proto: 0xFF,
-    };
-
-    pci.port.map_rx_flow_2_queue(pci.rxq() as u16, flow, flow_mask  );
-}
-*/
 
 fn get_tcp_port_base_by_manager_count(pci: &CacheAligned<PortQueue>, count: u16) -> u16 {
     let port_mask= pci.port.get_tcp_dst_port_mask();
@@ -184,6 +167,7 @@ impl ConnectionManager {
             port2con: HashMap::<u16, Connection, FnvHash>::with_hasher(Default::default()),
             free_ports: (tcp_port_base..max_tcp_port).collect(),
             pci,
+            c_statistics: Arc::new(ConnectionStatistics::new()),
             tcp_port_base,
         };
         // need to add last port this way to avoid overflow with slice, when max_tcp_port == 65535
@@ -199,6 +183,7 @@ impl ConnectionManager {
         cm
     }
 
+    fn get_statistics(&self) -> Arc<ConnectionStatistics> { self.c_statistics.clone() }
 
     fn owns_tcp_port(&self, tcp_port: u16) -> bool {
         tcp_port & self.pci.port.get_tcp_dst_port_mask() == self.tcp_port_base
@@ -284,15 +269,12 @@ impl ConnectionManager {
                     if let Some(c) = self.port2con.get_mut(&port) {
                         assert!(c.proxy_sport == 0);
                         c.initialize(s, port);
-                        debug!("tcp flow for {} created on port {:?}", s, port);
                         self.sock2port.insert(c.client_sock, port);
                     } else {
                     	// we never used this port before
                         let mut cc = Connection::default();
                         cc.client_sock = s;
                         c = Some(cc);
-                        // program an individual flow
-                        // program_rxflow_into_nic(&self.pci, self.proxy_data.ip, port);
                     };
                     if c.is_some() {
                         let mut c = c.unwrap();
@@ -300,6 +282,7 @@ impl ConnectionManager {
                         self.sock2port.insert(c.client_sock, port);
                         self.port2con.insert(port, c);
                         debug!("tcp flow for {} created on port {:?}", s, port);
+                        self.c_statistics.c_seized();
                     }
                     self.port2con.get_mut(&port)
                 } else {
@@ -324,6 +307,7 @@ impl ConnectionManager {
             assert!(port.unwrap() == c.proxy_sport);
             c.proxy_sport = 0u16; // this indicates an unused connection,
                                   // we keep unused connection in port2con table
+            self.c_statistics.c_released();
         }
     }
 }
@@ -428,41 +412,32 @@ pub fn setup_kni(kni_name: &str, ip_address: &str, mac_address: &str, kni_netns:
     info!("show IP addr: {}\n {}", output.status, String::from_utf8_lossy(&reply2));
 }
 
-pub fn setup_forwarder<S, F1, F2>(
+
+pub fn setup_forwarder<F1, F2>(
     core: i32,
     pci: &CacheAligned<PortQueue>,
     kni: &CacheAligned<PortQueue>,
-    sched: &mut S,
+    sched: &mut StandaloneScheduler,
     pd: L234Data,
     f_select_server: Arc<F1>,
     f_process_payload_c_s: Arc<F2>,
+    tx: Sender<MessageFrom>
 ) where
-    S: Scheduler + Sized,
     F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
     F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + Sync + 'static,
 {
-    debug!("enter setup_forwarder for core {}, port {} with rxq {}", core, pci.port.port_id(), pci.rxq());
+    let pipeline_id = PipelineId {
+        core: core as u16,
+        port_id: pci.port.port_id() as u16,
+        rxq: pci.rxq(),
+    };
+    debug!("enter setup_forwarder {}", pipeline_id);
 
     let mut sm = ConnectionManager::new(pci.clone(), pd.clone());
-/* so far we are using the ntuple filter, which does not support non-trivial masks
-    let flow: FiveTupleV4 = FiveTupleV4 {
-        src_ip: 0u32,
-        dst_ip: pd.ip,
-        src_port: 0u16,
-        dst_port: sm.tcp_port_base(),
-        proto: 0x06, // TCP
-    };
+    spawn_recv_thread(pipeline_id.clone(), sm.get_statistics(), tx);
 
-    let flow_mask= FiveTupleV4 {
-        src_ip: 0u32,
-        dst_ip: 0xFFFFFFFF,
-        src_port: 0u16,
-        dst_port: sm.tcp_port_mask(),
-        proto: 0xFF,
-    };
+    // TODO let mut statistics = ProxyMessages::new(pci.rxq() );
 
-    pci.port.map_rx_flow_2_queue(pci.rxq() as u16, flow, flow_mask  );
-*/
     // we need this queue for the delayed bindrequest
     let (producer, consumer) = new_mpsc_queue_pair();
 
@@ -528,6 +503,7 @@ pub fn setup_forwarder<S, F1, F2>(
         sched,
     );
 
+
     // group 0 -> dump packets
     // group 1 -> send to PCI
     // group 2 -> send to KNI
@@ -535,7 +511,7 @@ pub fn setup_forwarder<S, F1, F2>(
     // process TCP traffic addressed to Proxy
     let mut l4groups = l2groups.get_group(1).unwrap().parse::<IpHeader>().parse::<TcpHeader>().group_by(
         3,
-        box move |p| {
+        box move |p| {  // this is the major closure for TCP processing
             struct HeaderState<'a> {
                 mac: &'a mut MacHeader,
                 ip: &'a mut IpHeader,
@@ -914,6 +890,7 @@ pub fn setup_forwarder<S, F1, F2>(
                         if c.s_state == TcpState::SynReceived && hs.tcp.ack_flag() && hs.tcp.syn_flag() {
                             c.s_state = TcpState::Established;
                             debug!("established two-way client server connection");
+                            // TODO statistics.full_connect();
                             server_synack_received(p, &mut c, &mut hs, &mut producer);
                             group_index = 0; // packets are sent via extra queue
                         } else if hs.tcp.fin_flag() {
@@ -976,6 +953,7 @@ pub fn setup_forwarder<S, F1, F2>(
             if let Some(release_proxy_sport) = release_proxy_sport {
                 debug!("releasing port {}", release_proxy_sport);
                 sm.release_port(release_proxy_sport);
+                //TODO statistics.port_release();
             }
             do_ttl(&mut hs);
             group_index

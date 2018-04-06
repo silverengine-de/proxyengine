@@ -1,5 +1,6 @@
 #![feature(box_syntax)]
 #![feature(tcpstream_connect_timeout)]
+#![feature(integer_atomics)]
 
 // Logging
 #[macro_use]
@@ -19,17 +20,10 @@ extern crate error_chain;
 
 pub mod nftcp;
 pub use nftcp::L234Data;
-pub mod errors;
+pub use channel::{MessageFrom, MessageTo};
 
-use std::fs::File;
-use std::io::Read;
-use std::any::Any;
-use std::net::Ipv4Addr;
-use std::collections::HashSet;
-use std::fs;
-use std::path::Path;
-use std::sync::Arc;
-use std::ptr;
+pub mod errors;
+mod channel;
 
 use ipnet::Ipv4Net;
 use eui48::MacAddress;
@@ -42,6 +36,23 @@ use e2d2::interface::PortQueue;
 
 use errors::*;
 use nftcp::*;
+
+use std::fs::File;
+use std::io::Read;
+use std::any::Any;
+use std::net::Ipv4Addr;
+use std::collections::{ HashSet, HashMap };
+use std::fs;
+use std::path::Path;
+use std::sync::Arc;
+use std::ptr;
+use std::sync::mpsc::Sender;
+use std::sync::mpsc::Receiver;
+use std::thread;
+use std::time::Duration;
+use std::sync::mpsc::RecvTimeoutError;
+use channel::PipelineId;
+use channel::ConnectionStatistics;
 
 #[derive(Deserialize)]
 struct Config {
@@ -207,15 +218,15 @@ pub fn print_xstatistics(port_id: u16) -> i32 {
     len
 }
 
-pub fn setup_pipelines<S, F1, F2>(
+pub fn setup_pipelines<F1, F2>(
     core: i32,
     ports: HashSet<CacheAligned<PortQueue>>,
-    sched: &mut S,
-    proxy_config: ProxyEngineConfig,
+    sched: &mut StandaloneScheduler,
+    proxy_config: &ProxyEngineConfig,
     f_select_server: Arc<F1>,
     f_process_payload_c_s: Arc<F2>,
+    tx: Sender<MessageFrom>,
 ) where
-    S: Scheduler + Sized,
     F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
     F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + Sync + 'static,
 {
@@ -270,9 +281,76 @@ pub fn setup_pipelines<S, F1, F2>(
         proxy_data,
         f_select_server,
         f_process_payload_c_s,
-        //        u32::from(CLIENT_IP.parse::<Ipv4Addr>().unwrap()),
-        //        MacAddress::parse_str(CLIENT_MAC).unwrap(),
+        tx,
     );
+}
+
+pub struct SetupPipelines<F1, F2>
+where
+    F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
+    F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + Sync + 'static,
+{
+    pub proxy_engine_config: ProxyEngineConfig,
+    pub f_select_server: Arc<F1>,
+    pub f_process_payload_c_s: Arc<F2>,
+    pub tx: Sender<MessageFrom>,
+}
+
+impl<F1, F2> ClosureCloner for SetupPipelines<F1, F2>
+where
+    F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
+    F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + Sync + 'static,
+{
+    fn get_clone(&self) -> Box<Fn(i32, HashSet<CacheAligned<PortQueue>>, &mut StandaloneScheduler) + Send> {
+        let pec = self.proxy_engine_config.clone();
+        let fss = self.f_select_server.clone();
+        let fpp = self.f_process_payload_c_s.clone();
+        let txx = self.tx.clone();
+        Box::new(move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
+            setup_pipelines(core, p, s, &pec, fss.clone(), fpp.clone(), txx.clone());
+        })
+    }
+}
+
+fn print_statistics(statistics: &HashMap<PipelineId, Arc<ConnectionStatistics>>) {
+    statistics.iter().for_each(|entry| {
+        info!("{}: {}", entry.0, entry.1);
+    });
+}
+
+pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>) {
+    let handle = thread::spawn(move || {
+        let mut senders = HashMap::new();
+        let mut statistics = HashMap::new();
+        loop {
+            match mrx.recv_timeout(Duration::from_millis(60000)) {
+                Ok(MessageFrom::Channel(pipeline_id, sender)) => {
+                    debug!("got sender from {}", pipeline_id);
+                    sender.send(MessageTo::Hello).unwrap();
+                    senders.insert(pipeline_id, sender);
+                }
+                Ok(MessageFrom::Statistics(pipeline_id, c_statistics)) => {
+                    debug!("got statistics from {}", pipeline_id);
+                    statistics.insert(pipeline_id, c_statistics);
+                }
+                Ok(MessageFrom::Exit) => {
+                    senders.values().for_each(|ref tx| {
+                        tx.send(MessageTo::Exit).unwrap();
+                    });
+                    break;
+                }
+                Err(RecvTimeoutError::Timeout) => {  }
+                Err(e) => {
+                    error!("error receiving from message channel: {}", e);
+                    break;
+                }
+                _ => warn!("illegal message"),
+            }
+            print_statistics(&statistics);
+        }
+        print_statistics(&statistics);
+        info!("exiting recv thread ...");
+    });
 }
 
 #[cfg(test)]
@@ -289,26 +367,27 @@ mod tests {
     use std::env;
     use std::time::Duration;
     use std::thread;
-    use std::collections::HashSet;
     use std::io::Read;
     use std::io::Write;
     use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::sync::mpsc::{channel};
 
     use ipnet::Ipv4Net;
 
     use e2d2::config::{basic_opts, read_matches};
     use e2d2::native::zcsi::*;
-    use e2d2::interface::{PmdPort, PortQueue};
-    use e2d2::scheduler::{initialize_system, StandaloneScheduler};
-    use e2d2::allocators::CacheAligned;
+    use e2d2::interface::PmdPort;
+    use e2d2::scheduler::initialize_system;
 
     use nftcp::{setup_kni, Connection};
     use read_proxy_config;
-    use setup_pipelines;
     use get_mac_from_ifname;
     use print_hard_statistics;
+    use SetupPipelines;
     use Container;
     use L234Data;
+    use MessageFrom;
+    use spawn_recv_thread;
 
     #[test]
     fn delayed_binding_proxy() {
@@ -367,8 +446,6 @@ mod tests {
             Err(f) => panic!(f.to_string()),
         };
         let mut configuration = read_matches(&matches, &opts);
-
-        //  let (tx, rx) = channel::<TcpEvent>();
 
         let l234data: Vec<L234Data> = proxy_config
             .servers
@@ -430,15 +507,21 @@ mod tests {
             Ok(mut context) => {
                 context.start_schedulers();
 
+                let (mtx, mrx) = channel::<MessageFrom>();
+
                 let proxy_config_cloned = proxy_config.clone();
                 let boxed_fss = Arc::new(f_select_server);
                 let boxed_fpp = Arc::new(f_process_payload_c_s);
-                context.add_pipeline_to_run(Arc::new(
-                    move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
-                        setup_pipelines(core, p, s, proxy_config_cloned.clone(), boxed_fss.clone(), boxed_fpp.clone())
-                    },
-                ));
 
+                let setup_pipeline_cloner = SetupPipelines {
+                    proxy_engine_config: proxy_config_cloned,
+                    f_select_server: boxed_fss,
+                    f_process_payload_c_s: boxed_fpp,
+                    tx: mtx.clone(),
+                };
+
+                context.add_pipeline_to_run(setup_pipeline_cloner);
+                spawn_recv_thread(mrx);
                 context.execute();
 
                 // set up kni
@@ -516,18 +599,16 @@ mod tests {
                     }
                 }
 
-                debug!("main thread goes sleeping ...");
-                thread::sleep(Duration::from_millis(2000 as u64)); // Sleep for a bit
-                debug!("main thread awake again");
+                thread::sleep_ms(500); // Sleep for a bit
                 print_hard_statistics(1u16);
-
                 for port in context.ports.values() {
                     println!("Port {}:{}", port.port_type(), port.port_id());
                     port.print_soft_statistics();
                 }
 
                 info!("terminating ProxyEngine ...");
-
+                mtx.send(MessageFrom::Exit);
+                thread::sleep_ms(200);
                 std::process::exit(0);
             }
             Err(ref e) => {

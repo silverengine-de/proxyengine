@@ -11,18 +11,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::env;
 use std::time::Duration;
 use std::thread;
-use std::collections::HashSet;
+use std::sync::mpsc::channel;
 
 use e2d2::native::zcsi::*;
-use e2d2::scheduler::{initialize_system, NetBricksContext, StandaloneScheduler};
-use e2d2::interface::{PmdPort, PortQueue, PortType};
+use e2d2::scheduler::{initialize_system, NetBricksContext};
+use e2d2::interface::{PmdPort, PortType};
 use e2d2::config::{basic_opts, read_matches};
-use e2d2::allocators::CacheAligned;
 
 use tcp_proxy::nftcp::{setup_kni, Connection};
-use tcp_proxy::{get_mac_from_ifname, print_hard_statistics, read_proxy_config, setup_pipelines};
+use tcp_proxy::{get_mac_from_ifname, print_hard_statistics, read_proxy_config, SetupPipelines};
 use tcp_proxy::Container;
 use tcp_proxy::L234Data;
+use tcp_proxy::MessageFrom;
 use tcp_proxy::errors::*;
 
 pub fn main() {
@@ -100,13 +100,11 @@ pub fn main() {
         })
         .collect();
 
-    let proxy_config_cloned = proxy_config.clone();
-
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_select_server = move |c: &mut Connection| {
         let remainder = c.client_sock.port() as usize % l234data.len();
         c.server = Some(l234data[remainder]);
-        info!("selecting {}", proxy_config_cloned.servers[remainder].id);
+        // info!("selecting {}", proxy_config_cloned.servers[remainder].id);
         // initialize userdata
         if let Some(_) = c.userdata {
             c.userdata.as_mut().unwrap().init();
@@ -143,30 +141,39 @@ pub fn main() {
 
     pub fn check_system(context: NetBricksContext) -> Result<NetBricksContext> {
         for port in context.ports.values() {
-            if port.port_type()==&PortType::Dpdk {
+            if port.port_type() == &PortType::Dpdk {
                 debug!("Supported filters on port {}:", port.port_id());
-                for i in RteFilterType::RteEthFilterNone as i32 +1 .. RteFilterType::RteEthFilterMax as i32 {
+                for i in RteFilterType::RteEthFilterNone as i32 + 1..RteFilterType::RteEthFilterMax as i32 {
                     let result = unsafe { rte_eth_dev_filter_supported(port.port_id() as u16, RteFilterType::from(i)) };
                     debug!("{0: <30}: {1: >5}", RteFilterType::from(i), result);
                 }
             }
-        };
+        }
         Ok(context)
     }
 
-    match initialize_system(&mut configuration).map_err(|e| e.into()).and_then(|ctxt| check_system(ctxt)) {
+    match initialize_system(&mut configuration)
+        .map_err(|e| e.into())
+        .and_then(|ctxt| check_system(ctxt))
+    {
         Ok(mut context) => {
             print_hard_statistics(1u16);
             context.start_schedulers();
 
+            let (stat_tx, stat_rx) = channel::<MessageFrom>();
+
             let proxy_config_cloned = proxy_config.clone();
             let boxed_fss = Arc::new(f_select_server);
             let boxed_fpp = Arc::new(f_process_payload_c_s);
-            context.add_pipeline_to_run(Arc::new(
-                move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
-                    setup_pipelines(core, p, s, proxy_config_cloned.clone(), boxed_fss.clone(), boxed_fpp.clone())
-                },
-            ));
+
+            let setup_pipeline_cloner = SetupPipelines {
+                proxy_engine_config: proxy_config_cloned,
+                f_select_server: boxed_fss,
+                f_process_payload_c_s: boxed_fpp,
+                tx: stat_tx,
+            };
+
+            context.add_pipeline_to_run(setup_pipeline_cloner);
 
             context.execute();
 
@@ -200,6 +207,8 @@ pub fn main() {
                 port.print_soft_statistics();
             }
             println!("terminating ProxyEngine ...");
+            context.stop();
+            thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
             std::process::exit(0);
         }
         Err(ref e) => {
