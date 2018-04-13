@@ -1,38 +1,48 @@
-extern crate tcp_proxy;
-// Logging
-#[macro_use]
-extern crate log;
 extern crate ctrlc;
 extern crate e2d2;
+extern crate tcp_proxy;
+extern crate time;
+#[macro_use]
+extern crate log;
 extern crate env_logger;
+extern crate ipnet;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::env;
 use std::time::Duration;
 use std::thread;
+use std::io::Read;
+use std::io::Write;
+use std::net::{SocketAddr, TcpStream};
 use std::sync::mpsc::channel;
 use std::collections::HashMap;
 
-use e2d2::native::zcsi::*;
-use e2d2::scheduler::{initialize_system, NetBricksContext};
-use e2d2::interface::{PmdPort, PortType};
-use e2d2::config::{basic_opts, read_matches};
+use ipnet::Ipv4Net;
 
-use tcp_proxy::nftcp::setup_kni;
+use e2d2::config::{basic_opts, read_matches};
+use e2d2::native::zcsi::*;
+use e2d2::interface::PmdPort;
+use e2d2::scheduler::initialize_system;
 use tcp_proxy::Connection;
-use tcp_proxy::{get_mac_from_ifname, print_hard_statistics, read_proxy_config, SetupPipelines};
+use tcp_proxy::nftcp::setup_kni;
+use tcp_proxy::read_proxy_config;
+use tcp_proxy::get_mac_from_ifname;
+use tcp_proxy::print_hard_statistics;
+use tcp_proxy::SetupPipelines;
 use tcp_proxy::Container;
 use tcp_proxy::L234Data;
 use tcp_proxy::MessageFrom;
-use tcp_proxy::errors::*;
 use tcp_proxy::spawn_recv_thread;
 use tcp_proxy::PipelineId;
 use tcp_proxy::ConnectionStatistics;
+use tcp_proxy::ReleaseCause;
 
-pub fn main() {
+#[test]
+fn delayed_binding_proxy() {
     env_logger::init();
-    info!("Testing ProxyEngine ..");
+    info!("Testing timer_wheel of ProxyEngine ..");
+    let toml_file = "tests/client_syn_fin.toml";
 
     let log_level_rte = if log_enabled!(log::Level::Debug) {
         RteLogLevel::RteLogDebug
@@ -45,17 +55,13 @@ pub fn main() {
         info!("dpdk log global level: {}", rte_log_get_global_level());
         info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
     }
-    // read config file name from command line
-    let args: Vec<String> = env::args().collect();
-    let config_file;
-    if args.len() > 1 {
-        config_file = args[1].clone();
-    } else {
-        println!("try 'proxy_engine <toml configuration file>'\n");
-        std::process::exit(1);
-    }
 
-    let proxy_config = read_proxy_config(&config_file).unwrap();
+    let proxy_config = read_proxy_config(toml_file).unwrap();
+
+    if proxy_config.queries.is_none() {
+        error!("missing parameter 'queries' in configuration file");
+        std::process::exit(1);
+    };
 
     fn am_root() -> bool {
         match env::var("USER") {
@@ -65,10 +71,7 @@ pub fn main() {
     }
 
     if !am_root() {
-        error!(
-            " ... must run as root, e.g.: sudo -E env \"PATH=$PATH\" $executable, see also test.sh\n\
-             Do not run 'cargo test' as root."
-        );
+        error!(" ... must run as root, e.g.: sudo -E env \"PATH=$PATH\" $executable, see also test.sh\nDo not run 'cargo test' as root.");
         std::process::exit(1);
     }
 
@@ -81,7 +84,7 @@ pub fn main() {
 
     let opts = basic_opts();
 
-    let args: Vec<String> = vec!["proxyengine", "-f", &config_file]
+    let args: Vec<String> = vec!["proxyengine", "-f", toml_file]
         .iter()
         .map(|x| x.to_string())
         .collect::<Vec<String>>();
@@ -90,8 +93,6 @@ pub fn main() {
         Err(f) => panic!(f.to_string()),
     };
     let mut configuration = read_matches(&matches, &opts);
-
-    //  let (tx, rx) = channel::<TcpEvent>();
 
     let l234data: Vec<L234Data> = proxy_config
         .servers
@@ -105,11 +106,16 @@ pub fn main() {
         })
         .collect();
 
+    let proxy_config_cloned = proxy_config.clone();
+
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_select_server = move |c: &mut Connection| {
-        let remainder = c.client_sock.port() as usize % l234data.len();
+        let s = String::from_utf8(c.payload.to_vec()).unwrap();
+        // read first item in string and convert to usize:
+        let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
+        let remainder = stars % l234data.len();
         c.server = Some(l234data[remainder]);
-        // info!("selecting {}", proxy_config_cloned.servers[remainder].id);
+        info!("selecting {}", proxy_config_cloned.servers[remainder].id);
         // initialize userdata
         if let Some(_) = c.userdata {
             c.userdata.as_mut().unwrap().init();
@@ -119,50 +125,10 @@ pub fn main() {
     };
 
     // this is the closure, which may modify the payload of client to server packets in a TCP connection
-    let f_process_payload_c_s = |_c: &mut Connection, _payload: &mut [u8], _tailroom: usize| {
-        /*
-        if let IResult::Done(_, c_tag) = parse_tag(payload) {
-            let userdata: &mut MyData = &mut c.userdata
-                .as_mut()
-                .unwrap()
-                .mut_userdata()
-                .downcast_mut()
-                .unwrap();
-            userdata.c2s_count += payload.len();
-            debug!(
-                "c->s (tailroom { }, {:?}): {:?}",
-                tailroom,
-                userdata,
-                c_tag,
-            );
-        }
+    let f_process_payload_c_s = |_c: &mut Connection, _payload: &mut [u8], _tailroom: usize| {};
 
-        unsafe {
-            let payload_sz = payload.len(); }
-            let p_payload= payload[0] as *mut u8;
-            process_payload(p_payload, payload_sz, tailroom);
-        } */
-    };
-
-    pub fn check_system(context: NetBricksContext) -> Result<NetBricksContext> {
-        for port in context.ports.values() {
-            if port.port_type() == &PortType::Dpdk {
-                debug!("Supported filters on port {}:", port.port_id());
-                for i in RteFilterType::RteEthFilterNone as i32 + 1..RteFilterType::RteEthFilterMax as i32 {
-                    let result = unsafe { rte_eth_dev_filter_supported(port.port_id() as u16, RteFilterType::from(i)) };
-                    debug!("{0: <30}: {1: >5}", RteFilterType::from(i), result);
-                }
-            }
-        }
-        Ok(context)
-    }
-
-    match initialize_system(&mut configuration)
-        .map_err(|e| e.into())
-        .and_then(|ctxt| check_system(ctxt))
-    {
+    match initialize_system(&mut configuration) {
         Ok(mut context) => {
-            print_hard_statistics(1u16);
             context.start_schedulers();
 
             let (mtx, mrx) = channel::<MessageFrom>();
@@ -201,21 +167,67 @@ pub fn main() {
                     );
                 }
             }
-            //main loop
-            println!("press ctrl-c to terminate proxy ...");
-            while running.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
-            }
-            print_hard_statistics(1u16);
 
+            // emulate clients
+            let queries = proxy_config.queries.unwrap();
+            let proxy_addr = (proxy_config.proxy.ipnet.parse::<Ipv4Net>().unwrap().addr(), proxy_config.proxy.port);
+            // for this test tcp client timeout must be shorter than timeouts by timer wheel
+            let timeout = Duration::from_millis(50 as u64);
+
+            const CLIENT_THREADS: usize = 10;
+            for _i in 0..CLIENT_THREADS {
+                thread::spawn(move || {
+                    for ntry in 0..queries {
+                        match TcpStream::connect(&SocketAddr::from(proxy_addr)) {
+                            Ok(mut stream) => {
+                                debug!("test connection {}: TCP connect to proxy successful", ntry);
+                                stream.set_write_timeout(Some(timeout)).unwrap();
+                                stream.set_read_timeout(Some(timeout)).unwrap();
+                                match stream.write(&format!("{} stars", ntry).to_string().into_bytes()) {
+                                    Ok(_) => {
+                                        debug!("successfully send {} stars", ntry);
+                                        let mut buf = [0u8; 256];
+                                        match stream.read(&mut buf[..]) {
+                                            Ok(_) => info!("on try {} we received {}", ntry, String::from_utf8(buf.to_vec()).unwrap()),
+                                            _ => {
+                                                debug!("timeout on connection {} while waiting for answer", ntry);
+                                            }
+                                        };
+                                    }
+                                    _ => {
+                                        panic!("error when writing to test connection {}", ntry);
+                                    }
+                                }
+                            }
+                            _ => {
+                                panic!("test connection {}: 3-way handshake with proxy failed", ntry);
+                            }
+                        }
+                    }
+                });
+            }
+
+            thread::sleep(Duration::from_millis(5000)); // Sleep for a bit
+            print_hard_statistics(1u16);
             for port in context.ports.values() {
                 println!("Port {}:{}", port.port_type(), port.port_id());
                 port.print_soft_statistics();
             }
-            println!("terminating ProxyEngine ...");
+
+            info!("terminating ProxyEngine ...");
             mtx.send(MessageFrom::Exit).unwrap();
-            context.stop();
-            thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
+            thread::sleep(Duration::from_millis(500)); // wait for the statistics message
+
+            let statistics = sum_rx.recv_timeout(Duration::from_millis(1000));
+            assert!(statistics.is_ok());
+            let statistics = statistics.unwrap();
+            let mut tot_seized = 0u64;
+            for c_stat in statistics.values() {
+                assert_eq!(c_stat.get_seized(), c_stat.c_released(ReleaseCause::FinClient));
+                tot_seized += c_stat.get_seized();
+            }
+            assert_eq!(tot_seized, (queries * CLIENT_THREADS) as u64);
+
             std::process::exit(0);
         }
         Err(ref e) => {

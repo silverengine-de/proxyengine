@@ -10,307 +10,21 @@ use e2d2::headers::EndOffset;
 
 use std::sync::Arc;
 use std::cmp::min;
-use std::hash::BuildHasherDefault;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::collections::{HashMap, VecDeque};
-use std::any::Any;
 use std::process::Command;
 use std::sync::mpsc::Sender;
-use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
+use std::time::{Instant, Duration};
+use std::collections::BTreeMap;
 
-use eui48::MacAddress;
+
+
 use rand;
 
 use channel::*;
+use cmanager::*;
+use timer_wheel::TimerWheel;
 
 const MIN_FRAME_SIZE: usize = 60; // without fcs
-
-use fnv::FnvHasher;
-
-type FnvHash = BuildHasherDefault<FnvHasher>;
-
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
-pub enum TcpState {
-    Listen,
-    SynReceived,
-    SynSent,
-    Established,
-    CloseWait,
-    FinWait,
-    LastAck,
-    Closed,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct L234Data {
-    pub mac: MacAddress,
-    pub ip: u32,
-    pub port: u16,
-}
-
-pub trait UserData: Send + Sync + 'static {
-    fn ref_userdata(&self) -> &Any;
-    fn mut_userdata(&mut self) -> &mut Any;
-    fn init(&mut self);
-}
-
-#[derive(Debug, Clone, Copy, Eq, Hash)]
-pub enum CKey {
-    Port(u16),
-    Socket(SocketAddrV4),
-}
-
-impl PartialEq for CKey {
-    fn eq(&self, other: &CKey) -> bool {
-        match *other {
-            CKey::Port(p) => {
-                if let CKey::Port(x) = *self {
-                    p == x
-                } else {
-                    false
-                }
-            }
-            CKey::Socket(s) => {
-                if let CKey::Socket(x) = *self {
-                    s == x
-                } else {
-                    false
-                }
-            }
-        }
-    }
-}
-
-pub struct Connection {
-    pub payload: Box<Vec<u8>>,
-    pub client_sock: SocketAddrV4,
-    pub server: Option<L234Data>,
-    pub userdata: Option<Box<UserData>>,
-    //Box makes the trait object sizeable
-    client_mac: MacHeader,
-    proxy_sport: u16,
-    c_state: TcpState,
-    s_state: TcpState,
-    /// c_seqn is seqn for connection to client,
-    /// after the SYN-ACK from the target server it is the delta to be added to server seqn
-    /// see 'server_synack_received'
-    c_seqn: u32,
-    /// number of bytes inserted by proxy in connection from client to server
-    c2s_inserted_bytes: usize,
-    f_seqn: u32, // seqn for connection from client
-}
-
-impl Connection {
-    fn initialize(&mut self, client_sock: SocketAddrV4, proxy_sport: u16) {
-        self.payload.clear();
-        self.proxy_sport = proxy_sport;
-        self.client_sock = client_sock;
-        self.server = None;
-        self.userdata = None;
-        self.client_mac = MacHeader::default();
-        self.c_state = TcpState::Listen;
-        self.s_state = TcpState::Closed;
-        self.c_seqn = 0;
-        self.f_seqn = 0;
-        self.c2s_inserted_bytes = 0;
-    }
-}
-
-impl Default for Connection {
-    fn default() -> Connection {
-        Connection {
-            payload: Box::new(Vec::with_capacity(1500)),
-            client_sock: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0),
-            server: None,
-            userdata: None,
-            client_mac: MacHeader::default(),
-            proxy_sport: 0u16,
-            c_state: TcpState::Listen,
-            s_state: TcpState::Closed,
-            c_seqn: 0,
-            c2s_inserted_bytes: 0,
-            f_seqn: 0,
-        }
-    }
-}
-
-static GLOBAL_MANAGER_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
-
-
-
-struct ConnectionManager {
-    sock2port: HashMap<SocketAddrV4, u16, FnvHash>,
-    free_ports: VecDeque<u16>,
-    port2con: HashMap<u16, Connection, FnvHash>,
-    pci: CacheAligned<PortQueue>, // the PortQueue for which connections are managed
-    c_statistics: Arc< ConnectionStatistics>,
-    tcp_port_base: u16,
-}
-
-fn get_tcp_port_base_by_manager_count(pci: &CacheAligned<PortQueue>, count: u16) -> u16 {
-    let port_mask= pci.port.get_tcp_dst_port_mask();
-    debug!("port_mask= {}", port_mask);
-    port_mask - count * (!port_mask +1)
-}
-
-
-impl ConnectionManager {
-    fn new(pci: CacheAligned<PortQueue>, proxy_data: L234Data) -> ConnectionManager {
-        let old_manager_count: u16 = GLOBAL_MANAGER_COUNT.fetch_add(1, Ordering::SeqCst) as u16;
-        let port_mask= pci.port.get_tcp_dst_port_mask();
-        let tcp_port_base: u16 = get_tcp_port_base_by_manager_count(&pci, old_manager_count);
-        let max_tcp_port: u16 = tcp_port_base+!port_mask;
-        // program the NIC to send all flows for our owned ports to our rx queue
-        pci.port.add_fdir_filter(pci.rxq() as u16, proxy_data.ip, tcp_port_base).unwrap();
-        let mut cm = ConnectionManager {
-            sock2port: HashMap::<SocketAddrV4, u16, FnvHash>::with_hasher(Default::default()),
-            port2con: HashMap::<u16, Connection, FnvHash>::with_hasher(Default::default()),
-            free_ports: (tcp_port_base..max_tcp_port).collect(),
-            pci,
-            c_statistics: Arc::new(ConnectionStatistics::new()),
-            tcp_port_base,
-        };
-        // need to add last port this way to avoid overflow with slice, when max_tcp_port == 65535
-        cm.free_ports.push_back(max_tcp_port);
-        debug!(
-            "created ConnectionManager {} for port {}, rxq {} and tcp ports {} - {}",
-            old_manager_count,
-            PacketRx::port_id(&cm.pci),
-            cm.pci.rxq(),
-            cm.free_ports.front().unwrap(),
-            cm.free_ports.back().unwrap(),
-        );
-        cm
-    }
-
-    fn get_statistics(&self) -> Arc<ConnectionStatistics> { self.c_statistics.clone() }
-
-    fn owns_tcp_port(&self, tcp_port: u16) -> bool {
-        tcp_port & self.pci.port.get_tcp_dst_port_mask() == self.tcp_port_base
-    }
-
-    //fn tcp_port_base(&self) -> u16 { self.tcp_port_base }
-    //fn tcp_port_mask(&self) -> u16 { self.tcp_port_mask }
-
-    /*fn get(&self, key: &CKey) -> Option<&Connection> {
-        match *key {
-            CKey::Port(p) => {
-                if self.owns_tcp_port(p) {
-                    self.port2con.get(&p)
-                } else {
-                    None
-                }
-            }
-            CKey::Socket(s) => {
-                let port = self.sock2port.get(&s);
-                if port.is_some() {
-                    self.port2con.get(&port.unwrap())
-                } else {
-                    None
-                }
-            }
-        }
-    }
-    */
-    fn get_mut(&mut self, key: CKey) -> Option<&mut Connection> {
-        match key {
-            CKey::Port(p) => {
-                if self.owns_tcp_port(p) {
-                    if let Some(c) = self.port2con.get_mut(&p) {
-                        // need to check if c has a port != 0 assigned
-                        // otherwise it is released, as we keep released connections
-                        // and just mark them as unused by assigning port 0
-                        if c.proxy_sport != 0 {
-                            Some(c)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            CKey::Socket(s) => {
-                let port = self.sock2port.get(&s);
-                if port.is_some() {
-                    self.port2con.get_mut(&port.unwrap())
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    fn get_mut_or_insert(&mut self, key: CKey) -> Option<&mut Connection> {
-        match key {
-            CKey::Port(p) => {
-                if self.owns_tcp_port(p) {
-                    self.port2con.get_mut(&p)
-                } else {
-                    None
-                }
-            }
-            CKey::Socket(s) => {
-                {
-                    // we borrow sock2port here !
-                    let port = self.sock2port.get(&s);
-                    if port.is_some() {
-                        return self.port2con.get_mut(&port.unwrap());
-                    }
-                }
-                // now we are free to borrow sock2port mutably
-                let opt_port = self.free_ports.pop_front();
-                if opt_port.is_some() {
-                    let port = opt_port.unwrap();
-                    let mut c = None;
-                    // reuse a released connection ?
-                    if let Some(c) = self.port2con.get_mut(&port) {
-                        assert!(c.proxy_sport == 0);
-                        c.initialize(s, port);
-                        self.sock2port.insert(c.client_sock, port);
-                    } else {
-                    	// we never used this port before
-                        let mut cc = Connection::default();
-                        cc.client_sock = s;
-                        c = Some(cc);
-                    };
-                    if c.is_some() {
-                        let mut c = c.unwrap();
-                        c.initialize(s, port);
-                        self.sock2port.insert(c.client_sock, port);
-                        self.port2con.insert(port, c);
-                        debug!("tcp flow for {} created on port {:?}", s, port);
-                        self.c_statistics.c_seized();
-                    }
-                    self.port2con.get_mut(&port)
-                } else {
-                    None
-                }
-            }
-        }
-    }
-/*
-    fn release(&mut self, c: &mut Connection) {
-        self.free_ports.push_back(c.proxy_sport);
-        let port = self.sock2port.remove(&c.client_sock);
-        assert!(port.unwrap() == c.proxy_sport);
-        c.proxy_sport = 0;
-    }
-*/
-    fn release_port(&mut self, proxy_port: u16) {
-        if let Some(c) = self.port2con.get_mut(&proxy_port) {
-            self.free_ports.push_back(proxy_port);
-            assert!(proxy_port == c.proxy_sport);
-            let port = self.sock2port.remove(&c.client_sock);
-            assert!(port.unwrap() == c.proxy_sport);
-            c.proxy_sport = 0u16; // this indicates an unused connection,
-                                  // we keep unused connection in port2con table
-            self.c_statistics.c_released();
-        }
-    }
-}
 
 pub struct KniHandleRequest {
     pub kni_port: Arc<PmdPort>,
@@ -433,8 +147,10 @@ pub fn setup_forwarder<F1, F2>(
     };
     debug!("enter setup_forwarder {}", pipeline_id);
 
-    let mut sm = ConnectionManager::new(pci.clone(), pd.clone());
+    let mut sm = ConnectionManager::new(pipeline_id.clone(),pci.clone(), pd.clone(), tx.clone());
+    let mut wheel = TimerWheel::new(128, 16, 128);
     spawn_recv_thread(pipeline_id.clone(), sm.get_statistics(), tx);
+
 
     // TODO let mut statistics = ProxyMessages::new(pci.rxq() );
 
@@ -447,7 +163,7 @@ pub fn setup_forwarder<F1, F2>(
             .parse::<MacHeader>()
             .transform(box move |p| {
                 let ethhead = p.get_mut_header();
-                debug!("sending KNI frame to PCI: Eth header = { }", &ethhead);
+                //debug!("sending KNI frame to PCI: Eth header = { }", &ethhead);
             })
             .send(pci.clone());
         sched.add_task(forward2pci).unwrap();
@@ -460,10 +176,10 @@ pub fn setup_forwarder<F1, F2>(
     let l2filter_from_pci = ReceiveBatch::new(pci.clone()).parse::<MacHeader>().filter(box move |p| {
         let header = p.get_header();
         if header.dst == pd.mac {
-            debug!("{} from pci: found mac: {} ", thread_id_0, &header);
+            //debug!("{} from pci: found mac: {} ", thread_id_0, &header);
             true
         } else if header.dst.is_multicast() || header.dst.is_broadcast() {
-            debug!("{} from pci: multicast mac: {} ", thread_id_0, &header);
+            //debug!("{} from pci: multicast mac: {} ", thread_id_0, &header);
             true
         } else {
             debug!("{} from pci: discarding because mac unknown: {} ", thread_id_0, &header);
@@ -471,7 +187,7 @@ pub fn setup_forwarder<F1, F2>(
         }
     });
 
-    let tcp_min_port=get_tcp_port_base_by_manager_count(pci, GLOBAL_MANAGER_COUNT.load(Ordering::Relaxed) as u16);
+    let tcp_min_port=sm.tcp_port_base();
     // group the traffic into TCP traffic addressed to Proxy (group 1),
     // and send all other traffic to KNI (group 0)
     let mut l2groups = l2filter_from_pci.group_by(
@@ -488,14 +204,14 @@ pub fn setup_forwarder<F1, F2>(
                     if ipflow.dst_port == pd.port
                         || ipflow.dst_port >= tcp_min_port
                     {
-                        debug!("{} proxy tcp flow: {}", thread_id_1, ipflow);
+                        //debug!("{} proxy tcp flow: {}", thread_id_1, ipflow);
                         1
                     } else {
-                        debug!("{} no proxy tcp flow: {}", thread_id_1, ipflow);
+                        //debug!("{} no proxy tcp flow: {}", thread_id_1, ipflow);
                         0
                     }
                 } else {
-                    debug!("{} ignored by proxy: not a tcp flow or not addressed to proxy", thread_id_1);
+                    //debug!("{} ignored by proxy: not a tcp flow or not addressed to proxy", thread_id_1);
                     0
                 }
             }
@@ -578,10 +294,11 @@ pub fn setup_forwarder<F1, F2>(
                 h.tcp.set_seq_num(c.c_seqn);
                 update_tcp_checksum(p, h.ip.payload_size(0), h.ip.src(), h.ip.dst());
                 // debug!("checksum recalc = {:X}",p.get_header().checksum());
-                debug!("reply with (SYN-)ACK, L3: { }, L4: { }", h.ip, h.tcp);
+                debug!("(SYN-)ACK to client, L3: { }, L4: { }", h.ip, h.tcp);
             }
 
             fn set_proxy2server_headers(c: &mut Connection, h: &mut HeaderState, pd: &L234Data) {
+                if c.server.is_none() { debug!("****************** {}", c); }
                 h.mac.set_dmac(&c.server.as_ref().unwrap().mac);
                 h.mac.set_smac(&pd.mac);
                 let l2l3 = &c.server.as_ref().unwrap();
@@ -700,7 +417,7 @@ pub fn setup_forwarder<F1, F2>(
                 h.tcp.unset_ack_flag();
                 h.tcp.unset_psh_flag();
                 update_tcp_checksum(p, h.ip.payload_size(0), h.ip.src(), h.ip.dst());
-                debug!("new SYN packet L2: {}, L3: {}, L4: {}", h.mac, h.ip, p.get_header());
+                debug!("SYN packet to server - L3: {}, L4: {}", h.ip, p.get_header());
             }
 
             fn server_synack_received<M: Sized + Send>(
@@ -756,7 +473,7 @@ pub fn setup_forwarder<F1, F2>(
             }
 
             let mut group_index = 0usize; // the index of the group to be returned
-                                          // need to clone here, as this closure is an FnMut:
+            // need to clone here, as this closure must be an FnMut, not only FnOnce:
             let mut producer = producer.clone();
 
             assert!(p.get_pre_header().is_some()); // we must have parsed the headers
@@ -782,99 +499,117 @@ pub fn setup_forwarder<F1, F2>(
                 ip: hs_ip,
                 tcp: hs_tcp,
             };
-            // if this port is set by the following tcp state machine,
+            // if set by the following tcp state machine,
             // the port/connection becomes released afterwards
-            let mut release_proxy_sport = None;
+            let mut release_connection = (None, ReleaseCause::Unknown);
 
             if hs_flow.dst_port == pd.port {
                 //debug!("client to server");
                 let key = CKey::Socket(hs_flow.src_socket_addr());
-                let mut c = sm.get_mut_or_insert(key).unwrap();
-                // we only handle active open on client side:
-                // we reset server and client state
-                //TODO revisit this approach
+                let opt_c = if hs.tcp.syn_flag() {
+                    sm.get_mut_or_insert(key, &mut wheel)
+                } else {
+                    sm.get_mut(key)
+                };
 
-                let old_s_state = c.s_state;
-                let old_c_state = c.c_state;
+                if opt_c.is_none () {
+                    debug!("illegal client request or flow or out of resources");
+                } else {
+                    let mut c = opt_c.unwrap();
+                    // we only handle active open on client side:
+                    // we reset server and client state
+                    //TODO revisit this approach
+                    let old_s_state = c.s_state;
+                    let old_c_state = c.c_state;
 
-                if hs.tcp.syn_flag() {
-                    if c.c_state == TcpState::Listen {
-                        c.c_state = TcpState::SynSent;
-                        c.s_state = TcpState::Listen;
-                        // replies with a SYN-ACK to client:
-                        client_syn_received(p, &mut c, &mut hs);
-                        group_index = 1;
-                    } else {
-                        warn!("received client SYN in state {:?}/{:?}", c.c_state, c.s_state);
-                    }
-                } else if hs.tcp.ack_flag() && c.c_state == TcpState::SynSent {
-                    c.c_state = TcpState::Established;
-                    debug!("{} client side connection established for {:?}", thread_id_2, hs_flow.src_socket_addr());
-                } else if hs.tcp.ack_flag() && c.s_state == TcpState::FinWait {
-                    c.c_state = TcpState::CloseWait;
-                    c.s_state = TcpState::Closed;
-                    if hs.tcp.fin_flag() {
-                        c.c_state = TcpState::LastAck
-                    }
-                    debug!("{} transition to client/server state {:?}/{:?}", thread_id_2, c.c_state, c.s_state);
-                } else if c.s_state == TcpState::LastAck && hs.tcp.ack_flag() {
-                    // received final ack from client for client initiated close
-                    debug!(
-                        "received final ACK for client initiated close on port {}/{}",
-                        hs.tcp.src_port(),
-                        c.proxy_sport,
-                    );
-                    c.s_state = TcpState::Listen;
-                    c.c_state = TcpState::Listen;
-                    // release connection in the next block after the state machine
-                    release_proxy_sport = Some(c.proxy_sport);
-                    debug!("releasing connection state for {}/{}", hs.tcp.src_port(), c.proxy_sport);
-                } else if hs.tcp.fin_flag() {
-                    if c.s_state >= TcpState::FinWait {
-                        // we got a FIN as a receipt to a sent FIN (server closed connection)
-                        debug!("received FIN-reply from client {:?}", hs_flow.src_socket_addr());
-                        c.c_state = TcpState::LastAck;
+                    if hs.tcp.syn_flag() {
+                        if c.c_state == TcpState::Listen {
+                            c.c_state = TcpState::SynSent;
+                            c.s_state = TcpState::Listen;
+                            // replies with a SYN-ACK to client:
+                            client_syn_received(p, &mut c, &mut hs);
+                            group_index = 1;
+                        } else {
+                            warn!("received client SYN in state {:?}/{:?}", c.c_state, c.s_state);
+                        }
+                    } else if hs.tcp.ack_flag() && c.c_state == TcpState::SynSent {
+                        c.c_state = TcpState::Established;
+                        debug!("{} client side connection established for {:?}", thread_id_2, hs_flow.src_socket_addr());
+                    } else if hs.tcp.ack_flag() && c.s_state == TcpState::FinWait {
+                        c.c_state = TcpState::CloseWait;
                         c.s_state = TcpState::Closed;
-                    } else {
-                        // client wants to close connection
+                        if hs.tcp.fin_flag() {
+                            c.c_state = TcpState::LastAck
+                        }
+                        debug!("{} transition to client/server state {:?}/{:?}", thread_id_2, c.c_state, c.s_state);
+                    } else if c.s_state == TcpState::LastAck && hs.tcp.ack_flag() {
+                        // received final ack from client for client initiated close
                         debug!(
-                            "client sends FIN on port {}/{} in state {:?}/{:?}",
+                            "received final ACK for client initiated close on port {}/{}",
+                            hs.tcp.src_port(),
+                            c.proxy_sport,
+                        );
+                        c.s_state = TcpState::Listen;
+                        c.c_state = TcpState::Listen;
+                        // release connection in the next block after the state machine
+                        release_connection = (Some(c.proxy_sport), ReleaseCause::FinClient);
+                        debug!("releasing connection state for {}/{}", hs.tcp.src_port(), c.proxy_sport);
+                    } else if hs.tcp.fin_flag() {
+                        if c.s_state >= TcpState::FinWait {
+                            // we got a FIN as a receipt to a sent FIN (server closed connection)
+                            debug!("received FIN-reply from client {:?}", hs_flow.src_socket_addr());
+                            c.c_state = TcpState::LastAck;
+                            c.s_state = TcpState::Closed;
+                        } else {
+                            // client wants to close connection
+                            debug!(
+                                "client sends FIN on port {}/{} in state {:?}/{:?}",
+                                hs.tcp.src_port(),
+                                c.proxy_sport,
+                                c.c_state,
+                                c.s_state
+                            );
+                            if c.s_state >= TcpState::Established {
+                                c.c_state = TcpState::FinWait;
+                            }
+                            else {
+                                // in case the server connection is still not established
+                                // proxy must close connection and sends Fin-Ack to client
+                                make_reply_packet(&mut hs);
+                                hs.tcp.set_ack_flag();
+                                c.c_seqn = c.c_seqn.wrapping_add(1);
+                                hs.tcp.set_seq_num(c.c_seqn);
+                                //debug!("data_len= { }, p= { }",p.data_len(), p);
+                                update_tcp_checksum(p, hs.ip.payload_size(0), hs.ip.src(), hs.ip.dst());
+                                c.c_state=TcpState::FinWait;
+                                debug!("(FIN-)ACK to client, L3: { }, L4: { }", hs.ip, hs.tcp);
+                                release_connection = (Some(c.proxy_sport), ReleaseCause::FinClient);
+                                debug!("releasing connection state for {}/{}", hs.tcp.src_port(), c.proxy_sport);
+                                group_index = 1;
+                            }
+                        }
+                    } else if c.c_state == TcpState::Established && c.s_state == TcpState::Listen {
+                        // should be the first payload packet from client
+                        select_server(p, &mut c, &mut hs, &pd, &f_select_server);
+                        c.s_state = TcpState::SynReceived;
+                        group_index = 1;
+                    } else if c.s_state < TcpState::SynReceived || c.c_state < TcpState::Established {
+                        warn!(
+                            "{} unexpected client-side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
+                            thread_id_2,
                             hs.tcp.src_port(),
                             c.proxy_sport,
                             c.c_state,
-                            c.s_state
+                            c.s_state,
                         );
-                        if c.s_state >= TcpState::Established {
-                            c.c_state = TcpState::FinWait;
-                        }
-                        // in case the server connection is still not stable,
-                        // we can only ignore the FIN
-                        else {
-                            debug!("ignoring FIN request");
-                            group_index = 0;
-                        }
+                        group_index = 2;
                     }
-                } else if c.c_state == TcpState::Established && c.s_state == TcpState::Listen {
-                    // should be the first payload packet from client
-                    select_server(p, &mut c, &mut hs, &pd, &f_select_server);
-                    c.s_state = TcpState::SynReceived;
-                    group_index = 1;
-                } else if c.s_state < TcpState::Established || c.c_state < TcpState::Established {
-                    warn!(
-                        "{} unexpected client-side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
-                        thread_id_2,
-                        hs.tcp.src_port(),
-                        c.proxy_sport,
-                        c.c_state,
-                        c.s_state,
-                    );
-                    group_index = 2;
-                }
 
-                // once we established a two-way e2e-connection, we always forward the packets
-                if old_s_state >= TcpState::Established && old_c_state >= TcpState::Established {
-                    client_to_server(p, &mut c, &mut hs, &pd, &f_process_payload_c_s);
-                    group_index = 1;
+                    // once we established a two-way e2e-connection, we always forward the packets
+                    if old_s_state >= TcpState::Established && old_c_state >= TcpState::Established {
+                        client_to_server(p, &mut c, &mut hs, &pd, &f_process_payload_c_s);
+                        group_index = 1;
+                    }
                 }
             } else {
                 // should be server to client
@@ -915,15 +650,14 @@ pub fn setup_forwarder<F1, F2>(
                             c.s_state = TcpState::Listen;
                             c.c_state = TcpState::Listen;
                             // release connection in the next block
-                            release_proxy_sport = Some(c.proxy_sport);
+                            release_connection = (Some(c.proxy_sport), ReleaseCause::FinServer)
                         } else {
                             // debug!("received from server { } in c/s state {:?}/{:?} ", hs.tcp, c.c_state, c.s_state);
                             b_unexpected = true; //  except we revise it, see below
                         }
 
-                        // once we established a two-way e2e-connection, we always forward the packets
-                        if old_s_state >= TcpState::Established && old_c_state >= TcpState::Established {
-                            // this is the s->c part of the stable two-way connection state
+                        // once we established a client connection, we always forward server side packets
+                        if old_c_state >= TcpState::Established {
                             // translate packets and forward to client
                             server_to_client(p, &mut c, &mut hs, &pd);
                             group_index = 1;
@@ -942,7 +676,7 @@ pub fn setup_forwarder<F1, F2>(
                             group_index = 2;
                         }
                     } else {
-                        warn!("proxy port has no state, sending to KNI i/f");
+                        warn!("proxy port has no state on port {}, sending to KNI i/f", hs.tcp.dst_port());
                         // we send this to KNI which handles out-of-order TCP, e.g. by sending RST
                         group_index = 2;
                     }
@@ -950,10 +684,9 @@ pub fn setup_forwarder<F1, F2>(
             }
             // here we check if we shall release the connection state,
             // required because of borrow checker for the state manager sm
-            if let Some(release_proxy_sport) = release_proxy_sport {
-                debug!("releasing port {}", release_proxy_sport);
-                sm.release_port(release_proxy_sport);
-                //TODO statistics.port_release();
+            if let Some(sport) = release_connection.0 {
+                debug!("releasing port {}", sport);
+                sm.release_port_with_cause(sport, release_connection.1);
             }
             do_ttl(&mut hs);
             group_index

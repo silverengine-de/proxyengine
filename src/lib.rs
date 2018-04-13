@@ -1,6 +1,7 @@
 #![feature(box_syntax)]
 #![feature(tcpstream_connect_timeout)]
 #![feature(integer_atomics)]
+#![feature(inclusive_range_syntax)]
 
 // Logging
 #[macro_use]
@@ -19,11 +20,13 @@ extern crate serde;
 extern crate error_chain;
 
 pub mod nftcp;
-pub use nftcp::L234Data;
+pub use cmanager::{Connection, L234Data, ReleaseCause, UserData};
 pub use channel::{MessageFrom, MessageTo};
 
 pub mod errors;
 mod channel;
+mod cmanager;
+mod timer_wheel;
 
 use ipnet::Ipv4Net;
 use eui48::MacAddress;
@@ -41,7 +44,7 @@ use std::fs::File;
 use std::io::Read;
 use std::any::Any;
 use std::net::Ipv4Addr;
-use std::collections::{ HashSet, HashMap };
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -51,8 +54,8 @@ use std::sync::mpsc::Receiver;
 use std::thread;
 use std::time::Duration;
 use std::sync::mpsc::RecvTimeoutError;
-use channel::PipelineId;
-use channel::ConnectionStatistics;
+pub use channel::PipelineId;
+pub use channel::ConnectionStatistics;
 
 #[derive(Deserialize)]
 struct Config {
@@ -63,7 +66,7 @@ struct Config {
 pub struct ProxyEngineConfig {
     pub servers: Vec<ProxyServerConfig>,
     pub proxy: ProxyConfig,
-    queries: Option<usize>,
+    pub queries: Option<usize>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -318,10 +321,11 @@ fn print_statistics(statistics: &HashMap<PipelineId, Arc<ConnectionStatistics>>)
     });
 }
 
-pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>) {
+pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, sum_tx: Sender<HashMap<PipelineId, Arc<ConnectionStatistics>>>) {
     let handle = thread::spawn(move || {
         let mut senders = HashMap::new();
         let mut statistics = HashMap::new();
+        let mut n_connections = 0u64;
         loop {
             match mrx.recv_timeout(Duration::from_millis(60000)) {
                 Ok(MessageFrom::Channel(pipeline_id, sender)) => {
@@ -331,7 +335,7 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>) {
                 }
                 Ok(MessageFrom::Statistics(pipeline_id, c_statistics)) => {
                     debug!("got statistics from {}", pipeline_id);
-                    statistics.insert(pipeline_id, c_statistics);
+                    statistics.insert(pipeline_id.clone(), c_statistics.clone());
                 }
                 Ok(MessageFrom::Exit) => {
                     senders.values().for_each(|ref tx| {
@@ -339,285 +343,26 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>) {
                     });
                     break;
                 }
-                Err(RecvTimeoutError::Timeout) => {  }
+                Ok(MessageFrom::CRecord(pipeline_id, con_record)) => {
+                    n_connections += 1;
+                    info!(
+                        "from {}: connection {:10}, holding time = {:?}, release cause = {:?}",
+                        pipeline_id,
+                        n_connections,
+                        con_record.con_hold,
+                        con_record.get_release_cause(),
+                    );
+                }
+                Err(RecvTimeoutError::Timeout) => {}
                 Err(e) => {
                     error!("error receiving from message channel: {}", e);
                     break;
                 }
                 _ => warn!("illegal message"),
             }
-            print_statistics(&statistics);
         }
         print_statistics(&statistics);
+        sum_tx.send(statistics).unwrap();
         info!("exiting recv thread ...");
     });
-}
-
-#[cfg(test)]
-mod tests {
-
-    extern crate ctrlc;
-    extern crate time;
-
-    use log;
-    use env_logger;
-    use std;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::env;
-    use std::time::Duration;
-    use std::thread;
-    use std::io::Read;
-    use std::io::Write;
-    use std::net::{SocketAddr, TcpListener, TcpStream};
-    use std::sync::mpsc::{channel};
-
-    use ipnet::Ipv4Net;
-
-    use e2d2::config::{basic_opts, read_matches};
-    use e2d2::native::zcsi::*;
-    use e2d2::interface::PmdPort;
-    use e2d2::scheduler::initialize_system;
-
-    use nftcp::{setup_kni, Connection};
-    use read_proxy_config;
-    use get_mac_from_ifname;
-    use print_hard_statistics;
-    use SetupPipelines;
-    use Container;
-    use L234Data;
-    use MessageFrom;
-    use spawn_recv_thread;
-
-    #[test]
-    fn delayed_binding_proxy() {
-        env_logger::init();
-        info!("Testing ProxyEngine ..");
-
-        let log_level_rte = if log_enabled!(log::Level::Debug) {
-            RteLogLevel::RteLogDebug
-        } else {
-            RteLogLevel::RteLogInfo
-        };
-        unsafe {
-            rte_log_set_global_level(log_level_rte);
-            rte_log_set_level(RteLogtype::RteLogtypePmd, log_level_rte);
-            info!("dpdk log global level: {}", rte_log_get_global_level());
-            info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
-        }
-        let timeout = Duration::from_millis(1000 as u64);
-
-        let proxy_config = read_proxy_config("proxy.toml").unwrap();
-
-        if proxy_config.queries.is_none() {
-            error!("missing parameter 'queries' in configuration file");
-            std::process::exit(1);
-        };
-
-        fn am_root() -> bool {
-            match env::var("USER") {
-                Ok(val) => val == "root",
-                Err(_e) => false,
-            }
-        }
-
-        if !am_root() {
-            error!(
-                " ... must run as root, e.g.: sudo -E env \"PATH=$PATH\" $executable, see also test.sh\nDo not run 'cargo test' as root."
-            );
-            std::process::exit(1);
-        }
-
-        let running = Arc::new(AtomicBool::new(true));
-        let r = running.clone();
-        ctrlc::set_handler(move || {
-            info!("received SIGINT or SIGTERM");
-            r.store(false, Ordering::SeqCst);
-        }).expect("error setting Ctrl-C handler");
-
-        let opts = basic_opts();
-
-        let args: Vec<String> = vec!["proxyengine", "-f", "proxy.toml"]
-            .iter()
-            .map(|x| x.to_string())
-            .collect::<Vec<String>>();
-        let matches = match opts.parse(&args[1..]) {
-            Ok(m) => m,
-            Err(f) => panic!(f.to_string()),
-        };
-        let mut configuration = read_matches(&matches, &opts);
-
-        let l234data: Vec<L234Data> = proxy_config
-            .servers
-            .iter()
-            .map(|srv_cfg| L234Data {
-                mac: srv_cfg
-                    .mac
-                    .unwrap_or(get_mac_from_ifname(srv_cfg.linux_if.as_ref().unwrap()).unwrap()),
-                ip: u32::from(srv_cfg.ip),
-                port: srv_cfg.port,
-            })
-            .collect();
-
-        let proxy_config_cloned = proxy_config.clone();
-
-        // this is the closure, which selects the target server to use for a new TCP connection
-        let f_select_server = move |c: &mut Connection| {
-            let s = String::from_utf8(c.payload.to_vec()).unwrap();
-            // read first item in string and convert to usize:
-            let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
-            let remainder = stars % l234data.len();
-            c.server = Some(l234data[remainder]);
-            info!("selecting {}", proxy_config_cloned.servers[remainder].id);
-            // initialize userdata
-            if let Some(_) = c.userdata {
-                c.userdata.as_mut().unwrap().init();
-            } else {
-                c.userdata = Some(Container::new());
-            }
-        };
-
-        // this is the closure, which may modify the payload of client to server packets in a TCP connection
-        let f_process_payload_c_s = |_c: &mut Connection, _payload: &mut [u8], _tailroom: usize| {
-            /*
-            if let IResult::Done(_, c_tag) = parse_tag(payload) {
-                let userdata: &mut MyData = &mut c.userdata
-                    .as_mut()
-                    .unwrap()
-                    .mut_userdata()
-                    .downcast_mut()
-                    .unwrap();
-                userdata.c2s_count += payload.len();
-                debug!(
-                    "c->s (tailroom { }, {:?}): {:?}",
-                    tailroom,
-                    userdata,
-                    c_tag,
-                );
-            }
-
-            unsafe {
-                let payload_sz = payload.len(); }
-                let p_payload= payload[0] as *mut u8;
-                process_payload(p_payload, payload_sz, tailroom);
-            } */
-        };
-
-        match initialize_system(&mut configuration) {
-            Ok(mut context) => {
-                context.start_schedulers();
-
-                let (mtx, mrx) = channel::<MessageFrom>();
-
-                let proxy_config_cloned = proxy_config.clone();
-                let boxed_fss = Arc::new(f_select_server);
-                let boxed_fpp = Arc::new(f_process_payload_c_s);
-
-                let setup_pipeline_cloner = SetupPipelines {
-                    proxy_engine_config: proxy_config_cloned,
-                    f_select_server: boxed_fss,
-                    f_process_payload_c_s: boxed_fpp,
-                    tx: mtx.clone(),
-                };
-
-                context.add_pipeline_to_run(setup_pipeline_cloner);
-                spawn_recv_thread(mrx);
-                context.execute();
-
-                // set up kni
-                debug!("Number of PMD ports: {}", PmdPort::num_pmd_ports());
-                for port in context.ports.values() {
-                    debug!(
-                        "port {}:{} -- mac_address= {}",
-                        port.port_type(),
-                        port.port_id(),
-                        port.mac_address()
-                    );
-                    if port.is_kni() {
-                        setup_kni(
-                            port.linux_if().unwrap(),
-                            &proxy_config.proxy.ipnet,
-                            &proxy_config.proxy.mac,
-                            &proxy_config.proxy.namespace,
-                        );
-                    }
-                }
-
-                // set up servers
-                for server in proxy_config.servers {
-                    let target_port = server.port; // moved into thread
-                    let target_ip = server.ip;
-                    let id = server.id;
-                    thread::spawn(move || match TcpListener::bind((target_ip, target_port)) {
-                        Ok(listener1) => {
-                            debug!("bound server {} to {}:{}", id, target_ip, target_port);
-                            for stream in listener1.incoming() {
-                                let mut stream = stream.unwrap();
-                                let mut buf = [0u8; 256];
-                                stream.read(&mut buf[..]).unwrap();
-                                debug!("server {} received: {}", id, String::from_utf8(buf.to_vec()).unwrap());
-                                stream.write(&format!("Thank You from {}", id).to_string().into_bytes()).unwrap();
-                            }
-                        }
-                        _ => {
-                            panic!("failed to bind server {} to {}:{}", id, target_ip, target_port);
-                        }
-                    });
-                }
-
-                thread::sleep(Duration::from_millis(2000 as u64)); // wait for the servers
-
-                // emulate clients
-                for ntry in 0..proxy_config.queries.unwrap() {
-                    match TcpStream::connect_timeout(
-                        &SocketAddr::from((proxy_config.proxy.ipnet.parse::<Ipv4Net>().unwrap().addr(), proxy_config.proxy.port)),
-                        timeout,
-                    ) {
-                        Ok(mut stream) => {
-                            debug!("test connection {}: TCP connect to proxy successful", ntry);
-                            stream.set_write_timeout(Some(timeout)).unwrap();
-                            stream.set_read_timeout(Some(timeout)).unwrap();
-                            match stream.write(&format!("{} stars", ntry).to_string().into_bytes()) {
-                                Ok(_) => {
-                                    debug!("successfully send {} stars", ntry);
-                                    let mut buf = [0u8; 256];
-                                    match stream.read(&mut buf[..]) {
-                                        Ok(_) => info!("on try {} we received {}", ntry, String::from_utf8(buf.to_vec()).unwrap()),
-                                        _ => {
-                                            panic!("timeout on connection {} while waiting for answer", ntry);
-                                        }
-                                    };
-                                }
-                                _ => {
-                                    panic!("error when writing to test connection {}", ntry);
-                                }
-                            }
-                        }
-                        _ => {
-                            panic!("test connection {}: 3-way handshake with proxy failed", ntry);
-                        }
-                    }
-                }
-
-                thread::sleep_ms(500); // Sleep for a bit
-                print_hard_statistics(1u16);
-                for port in context.ports.values() {
-                    println!("Port {}:{}", port.port_type(), port.port_id());
-                    port.print_soft_statistics();
-                }
-
-                info!("terminating ProxyEngine ...");
-                mtx.send(MessageFrom::Exit);
-                thread::sleep_ms(200);
-                std::process::exit(0);
-            }
-            Err(ref e) => {
-                error!("Error: {}", e);
-                if let Some(backtrace) = e.backtrace() {
-                    debug!("Backtrace: {:?}", backtrace);
-                }
-                std::process::exit(1);
-            }
-        }
-    }
 }
