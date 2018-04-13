@@ -13,10 +13,8 @@ use std::cmp::min;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::process::Command;
 use std::sync::mpsc::Sender;
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
 use std::collections::BTreeMap;
-
-
 
 use rand;
 
@@ -126,7 +124,6 @@ pub fn setup_kni(kni_name: &str, ip_address: &str, mac_address: &str, kni_netns:
     info!("show IP addr: {}\n {}", output.status, String::from_utf8_lossy(&reply2));
 }
 
-
 pub fn setup_forwarder<F1, F2>(
     core: i32,
     pci: &CacheAligned<PortQueue>,
@@ -135,7 +132,7 @@ pub fn setup_forwarder<F1, F2>(
     pd: L234Data,
     f_select_server: Arc<F1>,
     f_process_payload_c_s: Arc<F2>,
-    tx: Sender<MessageFrom>
+    tx: Sender<MessageFrom>,
 ) where
     F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
     F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + Sync + 'static,
@@ -147,10 +144,9 @@ pub fn setup_forwarder<F1, F2>(
     };
     debug!("enter setup_forwarder {}", pipeline_id);
 
-    let mut sm = ConnectionManager::new(pipeline_id.clone(),pci.clone(), pd.clone(), tx.clone());
+    let mut sm = ConnectionManager::new(pipeline_id.clone(), pci.clone(), pd.clone(), tx.clone());
     let mut wheel = TimerWheel::new(128, 16, 128);
     spawn_recv_thread(pipeline_id.clone(), sm.get_statistics(), tx);
-
 
     // TODO let mut statistics = ProxyMessages::new(pci.rxq() );
 
@@ -187,7 +183,7 @@ pub fn setup_forwarder<F1, F2>(
         }
     });
 
-    let tcp_min_port=sm.tcp_port_base();
+    let tcp_min_port = sm.tcp_port_base();
     // group the traffic into TCP traffic addressed to Proxy (group 1),
     // and send all other traffic to KNI (group 0)
     let mut l2groups = l2filter_from_pci.group_by(
@@ -201,9 +197,7 @@ pub fn setup_forwarder<F1, F2>(
             } else {
                 let ipflow = ipflow.unwrap();
                 if ipflow.dst_ip == pd.ip && ipflow.proto == 6 {
-                    if ipflow.dst_port == pd.port
-                        || ipflow.dst_port >= tcp_min_port
-                    {
+                    if ipflow.dst_port == pd.port || ipflow.dst_port >= tcp_min_port {
                         //debug!("{} proxy tcp flow: {}", thread_id_1, ipflow);
                         1
                     } else {
@@ -219,7 +213,6 @@ pub fn setup_forwarder<F1, F2>(
         sched,
     );
 
-
     // group 0 -> dump packets
     // group 1 -> send to PCI
     // group 2 -> send to KNI
@@ -227,7 +220,8 @@ pub fn setup_forwarder<F1, F2>(
     // process TCP traffic addressed to Proxy
     let mut l4groups = l2groups.get_group(1).unwrap().parse::<IpHeader>().parse::<TcpHeader>().group_by(
         3,
-        box move |p| {  // this is the major closure for TCP processing
+        box move |p| {
+            // this is the major closure for TCP processing
             struct HeaderState<'a> {
                 mac: &'a mut MacHeader,
                 ip: &'a mut IpHeader,
@@ -298,7 +292,9 @@ pub fn setup_forwarder<F1, F2>(
             }
 
             fn set_proxy2server_headers(c: &mut Connection, h: &mut HeaderState, pd: &L234Data) {
-                if c.server.is_none() { debug!("****************** {}", c); }
+                if c.server.is_none() {
+                    debug!("****************** {}", c);
+                }
                 h.mac.set_dmac(&c.server.as_ref().unwrap().mac);
                 h.mac.set_smac(&pd.mac);
                 let l2l3 = &c.server.as_ref().unwrap();
@@ -439,8 +435,7 @@ pub fn setup_forwarder<F1, F2>(
                 // before the delayed request
                 // to keep them in sequence
                 let p_clone = p.clone();
-                //debug!("new ACK packet L2: {}, L3: {}, L4: {}",
-                // h.mac, h.ip, p_clone.get_header());
+                debug!("last ACK of three way handshake towards server: L4: {}", p_clone.get_header());
                 producer.enqueue_one(p_clone);
 
                 if c.payload.len() > 0 {
@@ -467,13 +462,13 @@ pub fn setup_forwarder<F1, F2>(
                     // let sz=delayed_p.payload_size() as u32;
                     // delayed_p.get_mut_header().set_seq_num(c.f_seqn+sz);
                     update_tcp_checksum(&mut delayed_p, ip_payload_size, h.ip.src(), h.ip.dst());
-                    //debug!("delayed packet: { }", delayed_p);
+                    debug!("delayed packet: { }", delayed_p.get_header());
                     producer.enqueue_one(delayed_p);
                 }
             }
 
             let mut group_index = 0usize; // the index of the group to be returned
-            // need to clone here, as this closure must be an FnMut, not only FnOnce:
+                                          // need to clone here, as this closure must be an FnMut, not only FnOnce:
             let mut producer = producer.clone();
 
             assert!(p.get_pre_header().is_some()); // we must have parsed the headers
@@ -512,7 +507,7 @@ pub fn setup_forwarder<F1, F2>(
                     sm.get_mut(key)
                 };
 
-                if opt_c.is_none () {
+                if opt_c.is_none() {
                     debug!("illegal client request or flow or out of resources");
                 } else {
                     let mut c = opt_c.unwrap();
@@ -534,7 +529,11 @@ pub fn setup_forwarder<F1, F2>(
                         }
                     } else if hs.tcp.ack_flag() && c.c_state == TcpState::SynSent {
                         c.c_state = TcpState::Established;
-                        debug!("{} client side connection established for {:?}", thread_id_2, hs_flow.src_socket_addr());
+                        debug!(
+                            "{} client side connection established for {:?}",
+                            thread_id_2,
+                            hs_flow.src_socket_addr()
+                        );
                     } else if hs.tcp.ack_flag() && c.s_state == TcpState::FinWait {
                         c.c_state = TcpState::CloseWait;
                         c.s_state = TcpState::Closed;
@@ -571,8 +570,7 @@ pub fn setup_forwarder<F1, F2>(
                             );
                             if c.s_state >= TcpState::Established {
                                 c.c_state = TcpState::FinWait;
-                            }
-                            else {
+                            } else {
                                 // in case the server connection is still not established
                                 // proxy must close connection and sends Fin-Ack to client
                                 make_reply_packet(&mut hs);
@@ -581,7 +579,7 @@ pub fn setup_forwarder<F1, F2>(
                                 hs.tcp.set_seq_num(c.c_seqn);
                                 //debug!("data_len= { }, p= { }",p.data_len(), p);
                                 update_tcp_checksum(p, hs.ip.payload_size(0), hs.ip.src(), hs.ip.dst());
-                                c.c_state=TcpState::FinWait;
+                                c.c_state = TcpState::FinWait;
                                 debug!("(FIN-)ACK to client, L3: { }, L4: { }", hs.ip, hs.tcp);
                                 release_connection = (Some(c.proxy_sport), ReleaseCause::FinClient);
                                 debug!("releasing connection state for {}/{}", hs.tcp.src_port(), c.proxy_sport);
@@ -624,7 +622,8 @@ pub fn setup_forwarder<F1, F2>(
 
                         if c.s_state == TcpState::SynReceived && hs.tcp.ack_flag() && hs.tcp.syn_flag() {
                             c.s_state = TcpState::Established;
-                            debug!("established two-way client server connection");
+                            debug!("established two-way client server connection, SYN-ACK received: L3: {}, L4: {}", hs.ip, hs.tcp);
+
                             // TODO statistics.full_connect();
                             server_synack_received(p, &mut c, &mut hs, &mut producer);
                             group_index = 0; // packets are sent via extra queue
@@ -656,8 +655,8 @@ pub fn setup_forwarder<F1, F2>(
                             b_unexpected = true; //  except we revise it, see below
                         }
 
-                        // once we established a client connection, we always forward server side packets
-                        if old_c_state >= TcpState::Established {
+                        // once we established a two-way e-2-e connection, we always forward server side packets
+                        if old_s_state >= TcpState::Established && old_c_state >= TcpState::Established {
                             // translate packets and forward to client
                             server_to_client(p, &mut c, &mut hs, &pd);
                             group_index = 1;

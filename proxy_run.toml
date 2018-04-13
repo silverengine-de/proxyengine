@@ -1,5 +1,3 @@
-
-
 [netbricks]
 name        = "proxyengine"
 master_core = 0
@@ -15,5 +13,5 @@ vdev        = [ "net_kni0" ]    # for use of vdev with KNI PMD, see https://dpdk
 [proxyengine]
 
 proxy       = { namespace="nskni", mac="8e:f7:35:7e:73:91", ipnet="192.168.222.1/24", port=19999 }
-servers     = [ { id = "server 1", ip = "192.168.222.3", linux_if="enp7s0f1" , port = 8080 },
+servers     = [ { id = "redis 1", ip = "192.168.222.3", linux_if="enp7s0f1" , port = 6379 },
               ]
