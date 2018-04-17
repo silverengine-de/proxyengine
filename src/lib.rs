@@ -56,6 +56,7 @@ use std::time::Duration;
 use std::sync::mpsc::RecvTimeoutError;
 pub use channel::PipelineId;
 pub use channel::ConnectionStatistics;
+use timer_wheel::{duration_to_micros, duration_to_millis};
 
 #[derive(Deserialize)]
 struct Config {
@@ -74,6 +75,7 @@ pub struct ProxyConfig {
     pub namespace: String,
     pub mac: String,
     pub ipnet: String,
+    pub timeouts: Option<Timeouts>,
     pub port: u16,
 }
 
@@ -86,11 +88,39 @@ pub struct ProxyServerConfig {
     pub port: u16,
 }
 
+#[derive(Deserialize, Clone)]
+pub struct Timeouts {
+    established: Option<u64>, // in millis
+
+}
+
+impl Default for Timeouts {
+    fn default() -> Timeouts {
+        Timeouts {
+            established : Some(200),
+        }
+    }
+}
+
+impl Timeouts {
+    pub fn default_or_some(timeouts: &Option<Timeouts>) -> Timeouts {
+        let mut t=Timeouts::default();
+        if timeouts.is_some() {
+            let timeouts=timeouts.clone().unwrap();
+            if timeouts.established.is_some() { t.established= timeouts.established; }
+        }
+        t
+    }
+}
+
+
 pub fn read_proxy_config(filename: &str) -> Result<ProxyEngineConfig> {
     let mut toml_str = String::new();
     let _ = File::open(filename)
         .and_then(|mut f| f.read_to_string(&mut toml_str))
         .chain_err(|| E2d2ErrorKind::ConfigurationError(format!("Could not read file {}", filename)))?;
+
+    info!("toml configuration:\n {}", toml_str);
 
     let config: Config = match toml::from_str(&toml_str) {
         Ok(value) => value,
@@ -132,6 +162,7 @@ impl MyData {
 pub struct Container {
     mydata: MyData,
 }
+
 
 impl UserData for Container {
     #[inline]
@@ -270,18 +301,13 @@ pub fn setup_pipelines<F1, F2>(
             .unwrap();
     }
 
-    let proxy_data = L234Data {
-        mac: MacAddress::parse_str(&proxy_config.proxy.mac).unwrap(),
-        ip: u32::from(proxy_config.proxy.ipnet.parse::<Ipv4Net>().unwrap().addr()),
-        port: proxy_config.proxy.port,
-    };
 
     setup_forwarder(
         core,
         pci.unwrap(),
         kni.unwrap(),
         sched,
-        proxy_data,
+        proxy_config,
         f_select_server,
         f_process_payload_c_s,
         tx,
@@ -317,7 +343,7 @@ where
 
 fn print_statistics(statistics: &HashMap<PipelineId, Arc<ConnectionStatistics>>) {
     statistics.iter().for_each(|entry| {
-        info!("{}: {}", entry.0, entry.1);
+        println!("{}: {}", entry.0, entry.1);
     });
 }
 
@@ -346,10 +372,14 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, sum_tx: Sender<HashMap<Pipe
                 Ok(MessageFrom::CRecord(pipeline_id, con_record)) => {
                     n_connections += 1;
                     info!(
-                        "from {}: connection {:10}, holding time = {:?}, release cause = {:?}",
+                        "from {}: # {:7}, p_port= {}, hold = {:6} ms, c-setup = {:4} us, s-setup = {:4} ms, s_state = {:?}, rc = {:?}",
                         pipeline_id,
                         n_connections,
-                        con_record.con_hold,
+                        con_record.p_port,
+                        duration_to_millis(&con_record.con_hold),
+                        duration_to_micros(&(con_record.c_ack_recv -con_record.c_syn_recv)),
+                        duration_to_millis(&(con_record.s_ack_sent-con_record.s_syn_sent)),
+                        con_record.last_s_state,
                         con_record.get_release_cause(),
                     );
                 }

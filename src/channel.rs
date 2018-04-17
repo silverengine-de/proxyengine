@@ -99,7 +99,6 @@ pub fn spawn_recv_thread(pipeline_id: PipelineId, c_statistics: Arc<ConnectionSt
                     error!("{}: error receiving from message channel: {}", pipeline_id, e);
                     break;
                 }
-                _ => warn!("illegal message"),
             }
         }
     });

@@ -5,8 +5,12 @@ use std::cmp::min;
 use std::fmt::Debug;
 use std::thread;
 
-fn duration_to_millis(dur: &Duration) -> u64 {
+pub fn duration_to_millis(dur: &Duration) -> u64 {
     dur.as_secs()*1000 + (dur.subsec_nanos()/1000000) as u64
+}
+
+pub fn duration_to_micros(dur: &Duration) -> u64 {
+    dur.as_secs()*1000*1000 + (dur.subsec_nanos()/1000) as u64
 }
 
 pub struct TimerWheel<T>
@@ -39,6 +43,8 @@ where T: Clone {
     pub fn get_resolution(&self) -> Duration {
         Duration::from_millis(self.resolution_millis as u64)
     }
+
+    pub fn get_max_timeout_millis(&self) -> u64 { (self.no_slots as u64 -1) * self.resolution_millis as u64 }
 
     #[inline]
     pub fn tick(&mut self, now: &Instant) -> (Option<Drain<T>>, bool) {

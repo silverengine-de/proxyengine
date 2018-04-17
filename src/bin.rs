@@ -32,7 +32,7 @@ use tcp_proxy::ConnectionStatistics;
 
 pub fn main() {
     env_logger::init();
-    info!("Testing ProxyEngine ..");
+    info!("Starting ProxyEngine ..");
 
     let log_level_rte = if log_enabled!(log::Level::Debug) {
         RteLogLevel::RteLogDebug

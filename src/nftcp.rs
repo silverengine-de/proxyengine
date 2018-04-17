@@ -16,11 +16,16 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 use std::collections::BTreeMap;
 
+use eui48::MacAddress;
+use ipnet::Ipv4Net;
+
 use rand;
 
 use channel::*;
 use cmanager::*;
 use timer_wheel::TimerWheel;
+use ProxyEngineConfig;
+
 
 const MIN_FRAME_SIZE: usize = 60; // without fcs
 
@@ -129,7 +134,7 @@ pub fn setup_forwarder<F1, F2>(
     pci: &CacheAligned<PortQueue>,
     kni: &CacheAligned<PortQueue>,
     sched: &mut StandaloneScheduler,
-    pd: L234Data,
+    proxy_config: &ProxyEngineConfig,
     f_select_server: Arc<F1>,
     f_process_payload_c_s: Arc<F2>,
     tx: Sender<MessageFrom>,
@@ -137,6 +142,13 @@ pub fn setup_forwarder<F1, F2>(
     F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
     F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + Sync + 'static,
 {
+
+    let pd = L234Data {
+        mac: MacAddress::parse_str(&proxy_config.proxy.mac).unwrap(),
+        ip: u32::from(proxy_config.proxy.ipnet.parse::<Ipv4Net>().unwrap().addr()),
+        port: proxy_config.proxy.port,
+    };
+
     let pipeline_id = PipelineId {
         core: core as u16,
         port_id: pci.port.port_id() as u16,
@@ -144,7 +156,7 @@ pub fn setup_forwarder<F1, F2>(
     };
     debug!("enter setup_forwarder {}", pipeline_id);
 
-    let mut sm = ConnectionManager::new(pipeline_id.clone(), pci.clone(), pd.clone(), tx.clone());
+    let mut sm = ConnectionManager::new(pipeline_id.clone(), pci.clone(), pd.clone(), proxy_config.clone(), tx.clone());
     let mut wheel = TimerWheel::new(128, 16, 128);
     spawn_recv_thread(pipeline_id.clone(), sm.get_statistics(), tx);
 
@@ -293,14 +305,14 @@ pub fn setup_forwarder<F1, F2>(
 
             fn set_proxy2server_headers(c: &mut Connection, h: &mut HeaderState, pd: &L234Data) {
                 if c.server.is_none() {
-                    debug!("****************** {}", c);
+                    error!("no server set: {}", c);
                 }
                 h.mac.set_dmac(&c.server.as_ref().unwrap().mac);
                 h.mac.set_smac(&pd.mac);
                 let l2l3 = &c.server.as_ref().unwrap();
                 h.set_server_socket(l2l3.ip, l2l3.port);
                 h.ip.set_src(pd.ip);
-                h.tcp.set_src_port(c.proxy_sport);
+                h.tcp.set_src_port(c.p_port());
             }
 
             fn client_to_server<M: Sized + Send, F>(
@@ -317,7 +329,7 @@ pub fn setup_forwarder<F1, F2>(
                 let ip_client = h.ip.src();
                 let port_client = h.tcp.src_port();
                 set_proxy2server_headers(c, h, pd);
-                h.tcp.update_checksum_incremental(port_client, c.proxy_sport);
+                h.tcp.update_checksum_incremental(port_client, c.p_port());
                 h.tcp.update_checksum_incremental(pd.port, c.server.as_ref().unwrap().port);
                 h.tcp
                     .update_checksum_incremental(!finalize_checksum(ip_client), !finalize_checksum(c.server.as_ref().unwrap().ip));
@@ -355,7 +367,7 @@ pub fn setup_forwarder<F1, F2>(
                 h.tcp.set_src_port(pd.port);
                 h.tcp.set_dst_port(c.client_sock.port());
                 h.tcp.update_checksum_incremental(server_src_port, pd.port);
-                h.tcp.update_checksum_incremental(c.proxy_sport, c.client_sock.port());
+                h.tcp.update_checksum_incremental(c.p_port(), c.client_sock.port());
                 h.tcp
                     .update_checksum_incremental(!finalize_checksum(ip_server), !finalize_checksum(u32::from(*c.client_sock.ip())));
                 // adapt seqn and ackn from server packet
@@ -528,7 +540,7 @@ pub fn setup_forwarder<F1, F2>(
                             warn!("received client SYN in state {:?}/{:?}", c.c_state, c.s_state);
                         }
                     } else if hs.tcp.ack_flag() && c.c_state == TcpState::SynSent {
-                        c.c_state = TcpState::Established;
+                        c.client_con_established();
                         debug!(
                             "{} client side connection established for {:?}",
                             thread_id_2,
@@ -546,13 +558,13 @@ pub fn setup_forwarder<F1, F2>(
                         debug!(
                             "received final ACK for client initiated close on port {}/{}",
                             hs.tcp.src_port(),
-                            c.proxy_sport,
+                            c.p_port(),
                         );
                         c.s_state = TcpState::Listen;
                         c.c_state = TcpState::Listen;
                         // release connection in the next block after the state machine
-                        release_connection = (Some(c.proxy_sport), ReleaseCause::FinClient);
-                        debug!("releasing connection state for {}/{}", hs.tcp.src_port(), c.proxy_sport);
+                        release_connection = (Some(c.p_port()), ReleaseCause::FinClient);
+                        debug!("releasing connection state for {}/{}", hs.tcp.src_port(), c.p_port());
                     } else if hs.tcp.fin_flag() {
                         if c.s_state >= TcpState::FinWait {
                             // we got a FIN as a receipt to a sent FIN (server closed connection)
@@ -564,7 +576,7 @@ pub fn setup_forwarder<F1, F2>(
                             debug!(
                                 "client sends FIN on port {}/{} in state {:?}/{:?}",
                                 hs.tcp.src_port(),
-                                c.proxy_sport,
+                                c.p_port(),
                                 c.c_state,
                                 c.s_state
                             );
@@ -581,8 +593,8 @@ pub fn setup_forwarder<F1, F2>(
                                 update_tcp_checksum(p, hs.ip.payload_size(0), hs.ip.src(), hs.ip.dst());
                                 c.c_state = TcpState::FinWait;
                                 debug!("(FIN-)ACK to client, L3: { }, L4: { }", hs.ip, hs.tcp);
-                                release_connection = (Some(c.proxy_sport), ReleaseCause::FinClient);
-                                debug!("releasing connection state for {}/{}", hs.tcp.src_port(), c.proxy_sport);
+                                release_connection = (Some(c.p_port()), ReleaseCause::FinClient);
+                                debug!("releasing connection state for {}/{}", hs.tcp.src_port(), c.p_port());
                                 group_index = 1;
                             }
                         }
@@ -596,7 +608,7 @@ pub fn setup_forwarder<F1, F2>(
                             "{} unexpected client-side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
                             thread_id_2,
                             hs.tcp.src_port(),
-                            c.proxy_sport,
+                            c.p_port(),
                             c.c_state,
                             c.s_state,
                         );
@@ -621,9 +633,8 @@ pub fn setup_forwarder<F1, F2>(
                         let old_c_state = c.c_state;
 
                         if c.s_state == TcpState::SynReceived && hs.tcp.ack_flag() && hs.tcp.syn_flag() {
-                            c.s_state = TcpState::Established;
+                            c.server_con_established();
                             debug!("established two-way client server connection, SYN-ACK received: L3: {}, L4: {}", hs.ip, hs.tcp);
-
                             // TODO statistics.full_connect();
                             server_synack_received(p, &mut c, &mut hs, &mut producer);
                             group_index = 0; // packets are sent via extra queue
@@ -646,10 +657,10 @@ pub fn setup_forwarder<F1, F2>(
                         } else if c.c_state == TcpState::LastAck && hs.tcp.ack_flag() {
                             // received final ack from server for server initiated close
                             debug!("received final ACK for server initiated close on port { }", hs.tcp.dst_port());
-                            c.s_state = TcpState::Listen;
+                            c.s_state = TcpState::Closed;
                             c.c_state = TcpState::Listen;
                             // release connection in the next block
-                            release_connection = (Some(c.proxy_sport), ReleaseCause::FinServer)
+                            release_connection = (Some(c.p_port()), ReleaseCause::FinServer)
                         } else {
                             // debug!("received from server { } in c/s state {:?}/{:?} ", hs.tcp, c.c_state, c.s_state);
                             b_unexpected = true; //  except we revise it, see below
@@ -675,7 +686,7 @@ pub fn setup_forwarder<F1, F2>(
                             group_index = 2;
                         }
                     } else {
-                        warn!("proxy port has no state on port {}, sending to KNI i/f", hs.tcp.dst_port());
+                        warn!("proxy has no state on port {}, sending to KNI i/f", hs.tcp.dst_port());
                         // we send this to KNI which handles out-of-order TCP, e.g. by sending RST
                         group_index = 2;
                     }
