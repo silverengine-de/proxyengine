@@ -91,28 +91,26 @@ pub struct ProxyServerConfig {
 #[derive(Deserialize, Clone)]
 pub struct Timeouts {
     established: Option<u64>, // in millis
-
 }
 
 impl Default for Timeouts {
     fn default() -> Timeouts {
-        Timeouts {
-            established : Some(200),
-        }
+        Timeouts { established: Some(200) }
     }
 }
 
 impl Timeouts {
     pub fn default_or_some(timeouts: &Option<Timeouts>) -> Timeouts {
-        let mut t=Timeouts::default();
+        let mut t = Timeouts::default();
         if timeouts.is_some() {
-            let timeouts=timeouts.clone().unwrap();
-            if timeouts.established.is_some() { t.established= timeouts.established; }
+            let timeouts = timeouts.clone().unwrap();
+            if timeouts.established.is_some() {
+                t.established = timeouts.established;
+            }
         }
         t
     }
 }
-
 
 pub fn read_proxy_config(filename: &str) -> Result<ProxyEngineConfig> {
     let mut toml_str = String::new();
@@ -163,7 +161,6 @@ pub struct Container {
     mydata: MyData,
 }
 
-
 impl UserData for Container {
     #[inline]
     fn ref_userdata(&self) -> &Any {
@@ -192,6 +189,16 @@ pub fn get_mac_from_ifname(ifname: &str) -> Result<MacAddress> {
         f.read_to_string(&mut macaddr)
             .map_err(|e| e.into())
             .and_then(|_| MacAddress::parse_str(&macaddr.lines().next().unwrap_or("")).map_err(|e| e.into()))
+    })
+}
+
+pub fn get_mac_string_from_ifname(ifname: &str) -> Result<String> {
+    let iface = Path::new("/sys/class/net").join(ifname).join("address");
+    let mut macaddr = String::new();
+    fs::File::open(iface).map_err(|e| e.into()).and_then(|mut f| {
+        f.read_to_string(&mut macaddr)
+            .map_err(|e| e.into())
+            .and_then(|_| Ok(macaddr.lines().next().unwrap_or("").to_string()))
     })
 }
 
@@ -301,7 +308,6 @@ pub fn setup_pipelines<F1, F2>(
             .unwrap();
     }
 
-
     setup_forwarder(
         core,
         pci.unwrap(),
@@ -372,13 +378,14 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, sum_tx: Sender<HashMap<Pipe
                 Ok(MessageFrom::CRecord(pipeline_id, con_record)) => {
                     n_connections += 1;
                     info!(
-                        "from {}: # {:7}, p_port= {}, hold = {:6} ms, c-setup = {:4} us, s-setup = {:4} ms, s_state = {:?}, rc = {:?}",
+                        "from {}: # {:7}, p_port= {}, hold = {:6} ms, c-setup = {:6} us, s-setup = {:6} us, {}, s_state = {:?}, rc = {:?}",
                         pipeline_id,
                         n_connections,
                         con_record.p_port,
                         duration_to_millis(&con_record.con_hold),
-                        duration_to_micros(&(con_record.c_ack_recv -con_record.c_syn_recv)),
-                        duration_to_millis(&(con_record.s_ack_sent-con_record.s_syn_sent)),
+                        duration_to_micros(&(con_record.c_ack_recv - con_record.c_syn_recv)),
+                        duration_to_micros(&(con_record.s_ack_sent - con_record.s_syn_sent)),
+                        con_record.server_id,
                         con_record.last_s_state,
                         con_record.get_release_cause(),
                     );

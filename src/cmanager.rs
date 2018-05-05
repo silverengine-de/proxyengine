@@ -33,11 +33,12 @@ pub enum TcpState {
     Closed,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct L234Data {
     pub mac: MacAddress,
     pub ip: u32,
     pub port: u16,
+    pub server_id: String,
 }
 
 pub trait UserData: Send + Sync + 'static {
@@ -82,7 +83,7 @@ pub enum ReleaseCause {
     MaxCauses = 4,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ConRecord {
     pub p_port: u16,
     /// timestamp of SYN
@@ -96,6 +97,7 @@ pub struct ConRecord {
     /// holding time
     pub con_hold: Duration,
     pub last_s_state: TcpState,
+    pub server_id: String,
     release_cause: ReleaseCause,
 }
 
@@ -106,7 +108,8 @@ impl ConRecord {
         self.s_syn_sent = self.c_syn_recv;
         self.s_ack_sent = self.c_syn_recv;
         self.p_port = proxy_sport;
-        self.last_s_state= TcpState::Listen;
+        self.last_s_state = TcpState::Listen;
+        self.server_id.clear();
     }
     #[inline]
     fn c_released(&mut self, cause: ReleaseCause, last_s_state: TcpState) {
@@ -129,12 +132,12 @@ impl Default for ConRecord {
             s_ack_sent: Instant::now(),
             con_hold: Duration::default(),
             last_s_state: TcpState::Listen,
+            server_id: String::new(),
             release_cause: ReleaseCause::Unknown,
             p_port: 0u16,
         }
     }
 }
-
 
 pub struct Connection {
     pub payload: Box<Vec<u8>>,
@@ -163,7 +166,7 @@ impl Connection {
         self.server = None;
         self.userdata = None;
         self.client_mac = MacHeader::default();
-        self.p_port= proxy_sport;
+        self.p_port = proxy_sport;
         self.c_state = TcpState::Listen;
         self.s_state = TcpState::Closed;
         self.c_seqn = 0;
@@ -174,19 +177,19 @@ impl Connection {
     #[inline]
     pub fn client_con_established(&mut self) {
         self.c_state = TcpState::Established;
-        self.con_record.c_ack_recv =Instant::now();
+        self.con_record.c_ack_recv = Instant::now();
     }
 
     #[inline]
     pub fn server_syn_sent(&mut self) {
         self.s_state = TcpState::SynReceived;
-        self.con_record.s_syn_sent =Instant::now();
+        self.con_record.s_syn_sent = Instant::now();
     }
 
     #[inline]
     pub fn server_con_established(&mut self) {
         self.s_state = TcpState::Established;
-        self.con_record.s_ack_sent =Instant::now();
+        self.con_record.s_ack_sent = Instant::now();
     }
 
     #[inline]
@@ -196,7 +199,7 @@ impl Connection {
 
     #[inline]
     pub fn set_p_port(&mut self, port: u16) {
-        self.p_port =port;
+        self.p_port = port;
     }
 }
 
@@ -254,7 +257,13 @@ fn get_tcp_port_base_by_manager_count(pci: &CacheAligned<PortQueue>, count: u16)
 }
 
 impl<'a> ConnectionManager<'a> {
-    pub fn new(pipeline_id: PipelineId, pci: CacheAligned<PortQueue>, proxy_data: L234Data, proxy_config: ProxyEngineConfig, tx: Sender<MessageFrom>) -> ConnectionManager<'a> {
+    pub fn new(
+        pipeline_id: PipelineId,
+        pci: CacheAligned<PortQueue>,
+        proxy_data: L234Data,
+        proxy_config: ProxyEngineConfig,
+        tx: Sender<MessageFrom>,
+    ) -> ConnectionManager<'a> {
         let old_manager_count: u16 = GLOBAL_MANAGER_COUNT.fetch_add(1, Ordering::SeqCst) as u16;
         let port_mask = pci.port.get_tcp_dst_port_mask();
         let tcp_port_base: u16 = get_tcp_port_base_by_manager_count(&pci, old_manager_count);
@@ -265,7 +274,7 @@ impl<'a> ConnectionManager<'a> {
             sock2port: HashMap::<SocketAddrV4, u16, FnvHash>::with_hasher(Default::default()),
             sock2con: HashMap::<SocketAddrV4, &'a Connection, FnvHash>::with_hasher(Default::default()),
             //port2con: HashMap::<u16, Connection, FnvHash>::with_hasher(Default::default()),
-            port2con: vec!(Connection::default(); (!port_mask +1) as usize),
+            port2con: vec![Connection::default(); (!port_mask + 1) as usize],
             free_ports: (tcp_port_base..max_tcp_port).collect(),
             timeouts: Timeouts::default_or_some(&proxy_config.proxy.timeouts),
             pci,
@@ -290,7 +299,7 @@ impl<'a> ConnectionManager<'a> {
 
     #[inline]
     fn get_mut_con(&mut self, p: &u16) -> &mut Connection {
-        & mut self.port2con[(p-self.tcp_port_base) as usize]
+        &mut self.port2con[(p - self.tcp_port_base) as usize]
     }
 
     pub fn get_statistics(&self) -> Arc<ConnectionStatistics> {
@@ -348,7 +357,7 @@ impl<'a> ConnectionManager<'a> {
             CKey::Socket(s) => {
                 let port = self.sock2port.get(&s);
                 if port.is_some() {
-                    Some(& mut self.port2con[(port.unwrap()-self.tcp_port_base) as usize])
+                    Some(&mut self.port2con[(port.unwrap() - self.tcp_port_base) as usize])
                 } else {
                     None
                 }
@@ -358,7 +367,7 @@ impl<'a> ConnectionManager<'a> {
 
     fn get_timeouts(&mut self, now: &Instant, wheel: &mut TimerWheel<u16>) -> Vec<u16> {
         let mut con_timeouts: Vec<u16> = Vec::new();
-        let resolution=wheel.get_resolution();
+        let resolution = wheel.get_resolution();
         loop {
             match wheel.tick(now) {
                 (Some(mut drain), more) => {
@@ -397,7 +406,7 @@ impl<'a> ConnectionManager<'a> {
         match key {
             CKey::Port(p) => {
                 if self.owns_tcp_port(p) {
-                    Some(& mut self.port2con[(p-self.tcp_port_base) as usize])
+                    Some(&mut self.port2con[(p - self.tcp_port_base) as usize])
                 } else {
                     None
                 }
@@ -407,7 +416,7 @@ impl<'a> ConnectionManager<'a> {
                     // we borrow sock2port here !
                     let port = self.sock2port.get(&s);
                     if port.is_some() {
-                        return Some(& mut self.port2con[(port.unwrap()-self.tcp_port_base) as usize])
+                        return Some(&mut self.port2con[(port.unwrap() - self.tcp_port_base) as usize]);
                     }
                 }
                 // now we are free to borrow sock2port mutably
@@ -419,7 +428,7 @@ impl<'a> ConnectionManager<'a> {
                         let cc = &mut self.port2con[(port - self.tcp_port_base) as usize];
                         assert_eq!(cc.p_port(), 0);
                         cc.initialize(s, port);
-                        now=cc.con_record.c_syn_recv;
+                        now = cc.con_record.c_syn_recv;
                         debug!("tcp flow for {} created on port {:?}", s, port);
                     }
                     let port_vec = self.get_timeouts(&now, wheel);
@@ -439,22 +448,26 @@ impl<'a> ConnectionManager<'a> {
     }
 
     pub fn release_port(&mut self, proxy_port: u16) -> Option<&mut Connection> {
-        let c = & mut self.port2con[(proxy_port-self.tcp_port_base) as usize];
+        let c = &mut self.port2con[(proxy_port - self.tcp_port_base) as usize];
         // only if it is in use, i.e. it has been not released already
         if c.p_port() != 0 {
             self.free_ports.push_back(proxy_port);
             assert_eq!(proxy_port, c.p_port());
-            c.con_record.p_port=c.p_port(); // safe state into con_record
-            c.con_record.last_s_state=c.s_state;
+            c.con_record.p_port = c.p_port(); // safe state into con_record
+            c.con_record.last_s_state = c.s_state;
+            c.con_record.server_id = if c.server.is_some() {
+                c.server.as_ref().unwrap().server_id.clone()
+            } else {
+                String::from("<unselected>")
+            };
             let port = self.sock2port.remove(&c.client_sock);
             assert_eq!(port.unwrap(), c.p_port());
-            c.set_p_port(0u16);     // this indicates an unused connection,
-                                    // we keep unused connection in port2con table
+            c.set_p_port(0u16); // this indicates an unused connection,
+                                // we keep unused connection in port2con table
             Some(c)
         } else {
             None
         }
-
     }
 
     pub fn release_port_with_cause(&mut self, proxy_port: u16, release_cause: ReleaseCause) -> bool {
@@ -484,7 +497,9 @@ impl<'a> ConnectionManager<'a> {
             }
             if con_record.is_some() {
                 let con_record = con_record.unwrap();
-                self.tx.send(MessageFrom::CRecord(self.pipeline_id.clone(), con_record)).unwrap();
+                self.tx
+                    .send(MessageFrom::CRecord(self.pipeline_id.clone(), con_record.clone()))
+                    .unwrap();
                 self.c_statistics.c_released(con_record.get_release_cause());
             }
         });

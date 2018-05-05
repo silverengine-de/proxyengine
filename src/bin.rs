@@ -99,16 +99,17 @@ pub fn main() {
         .map(|srv_cfg| L234Data {
             mac: srv_cfg
                 .mac
-                .unwrap_or(get_mac_from_ifname(srv_cfg.linux_if.as_ref().unwrap()).unwrap()),
+                .unwrap_or_else(|| get_mac_from_ifname(srv_cfg.linux_if.as_ref().unwrap()).unwrap()),
             ip: u32::from(srv_cfg.ip),
             port: srv_cfg.port,
+            server_id: srv_cfg.id.clone(),
         })
         .collect();
 
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_select_server = move |c: &mut Connection| {
-        let remainder = c.client_sock.port() as usize % l234data.len();
-        c.server = Some(l234data[remainder]);
+        let remainder = c.client_sock.port().rotate_right(1) as usize % l234data.len();
+        c.server = Some(l234data[remainder].clone());
         // info!("selecting {}", proxy_config_cloned.servers[remainder].id);
         // initialize userdata
         if let Some(_) = c.userdata {

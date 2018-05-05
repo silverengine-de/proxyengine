@@ -147,6 +147,7 @@ pub fn setup_forwarder<F1, F2>(
         mac: MacAddress::parse_str(&proxy_config.proxy.mac).unwrap(),
         ip: u32::from(proxy_config.proxy.ipnet.parse::<Ipv4Net>().unwrap().addr()),
         port: proxy_config.proxy.port,
+        server_id: "ProxyEngine".to_string(),
     };
 
     let pipeline_id = PipelineId {
@@ -180,10 +181,11 @@ pub fn setup_forwarder<F1, F2>(
     let thread_id_1 = format!("<c{}, rx{}>: ", core, pci.rxq());
     let thread_id_2 = format!("<c{}, rx{}>: ", core, pci.rxq());
 
+    let pd_clone=pd.clone();
     // only accept traffic from PCI with matching L2 address
     let l2filter_from_pci = ReceiveBatch::new(pci.clone()).parse::<MacHeader>().filter(box move |p| {
         let header = p.get_header();
-        if header.dst == pd.mac {
+        if header.dst == pd_clone.mac {
             //debug!("{} from pci: found mac: {} ", thread_id_0, &header);
             true
         } else if header.dst.is_multicast() || header.dst.is_broadcast() {
@@ -196,6 +198,7 @@ pub fn setup_forwarder<F1, F2>(
     });
 
     let tcp_min_port = sm.tcp_port_base();
+    let pd_clone=pd.clone();
     // group the traffic into TCP traffic addressed to Proxy (group 1),
     // and send all other traffic to KNI (group 0)
     let mut l2groups = l2filter_from_pci.group_by(
@@ -208,8 +211,8 @@ pub fn setup_forwarder<F1, F2>(
                 0
             } else {
                 let ipflow = ipflow.unwrap();
-                if ipflow.dst_ip == pd.ip && ipflow.proto == 6 {
-                    if ipflow.dst_port == pd.port || ipflow.dst_port >= tcp_min_port {
+                if ipflow.dst_ip == pd_clone.ip && ipflow.proto == 6 {
+                    if ipflow.dst_port == pd_clone.port || ipflow.dst_port >= tcp_min_port {
                         //debug!("{} proxy tcp flow: {}", thread_id_1, ipflow);
                         1
                     } else {

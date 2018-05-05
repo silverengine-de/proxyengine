@@ -103,6 +103,7 @@ fn delayed_binding_proxy() {
                 .unwrap_or(get_mac_from_ifname(srv_cfg.linux_if.as_ref().unwrap()).unwrap()),
             ip: u32::from(srv_cfg.ip),
             port: srv_cfg.port,
+            server_id: srv_cfg.id.clone(),
         })
         .collect();
 
@@ -114,7 +115,7 @@ fn delayed_binding_proxy() {
         // read first item in string and convert to usize:
         let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
         let remainder = stars % l234data.len();
-        c.server = Some(l234data[remainder]);
+        c.server = Some(l234data[remainder].clone());
         info!("selecting {}", proxy_config_cloned.servers[remainder].id);
         // initialize userdata
         if let Some(_) = c.userdata {
