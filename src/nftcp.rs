@@ -13,8 +13,6 @@ use std::cmp::min;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::process::Command;
 use std::sync::mpsc::Sender;
-use std::time::{Duration, Instant};
-use std::collections::BTreeMap;
 
 use eui48::MacAddress;
 use ipnet::Ipv4Net;

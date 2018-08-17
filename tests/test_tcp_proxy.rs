@@ -156,7 +156,7 @@ fn delayed_binding_proxy() {
             context.start_schedulers();
 
             let (mtx, mrx) = channel::<MessageFrom>();
-            let (sum_tx, sum_rx) = channel::<HashMap<PipelineId, Arc<ConnectionStatistics>>>();
+            let (sum_tx, _sum_rx) = channel::<HashMap<PipelineId, Arc<ConnectionStatistics>>>();
 
             let proxy_config_cloned = proxy_config.clone();
             let boxed_fss = Arc::new(f_select_server);

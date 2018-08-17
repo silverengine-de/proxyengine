@@ -145,7 +145,7 @@ pub fn main() {
         } */
     };
 
-    pub fn check_system(context: NetBricksContext) -> Result<NetBricksContext> {
+    fn check_system(context: NetBricksContext) -> Result<NetBricksContext> {
         for port in context.ports.values() {
             if port.port_type() == &PortType::Dpdk {
                 debug!("Supported filters on port {}:", port.port_id());
@@ -167,7 +167,7 @@ pub fn main() {
             context.start_schedulers();
 
             let (mtx, mrx) = channel::<MessageFrom>();
-            let (sum_tx, sum_rx) = channel::<HashMap<PipelineId, Arc<ConnectionStatistics>>>();
+            let (sum_tx, _sum_rx) = channel::<HashMap<PipelineId, Arc<ConnectionStatistics>>>();
 
             let proxy_config_cloned = proxy_config.clone();
             let boxed_fss = Arc::new(f_select_server);

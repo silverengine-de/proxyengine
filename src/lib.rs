@@ -1,7 +1,5 @@
 #![feature(box_syntax)]
-#![feature(tcpstream_connect_timeout)]
 #![feature(integer_atomics)]
-#![feature(inclusive_range_syntax)]
 
 // Logging
 #[macro_use]
@@ -235,7 +233,7 @@ pub fn print_xstatistics(port_id: u16) -> i32 {
         }
         let xstats_names = vec![
             RteEthXstatName {
-                name: [0i8; RTE_ETH_XSTATS_NAME_SIZE],
+                name: [0; RTE_ETH_XSTATS_NAME_SIZE],
             };
             len as usize
         ];
@@ -331,7 +329,7 @@ where
     pub tx: Sender<MessageFrom>,
 }
 
-impl<F1, F2> ClosureCloner for SetupPipelines<F1, F2>
+impl<F1, F2> ClosureCloner<HashSet<CacheAligned<PortQueue>>> for SetupPipelines<F1, F2>
 where
     F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
     F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + Sync + 'static,
