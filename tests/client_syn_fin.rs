@@ -22,14 +22,16 @@ use ipnet::Ipv4Net;
 
 use e2d2::config::{basic_opts, read_matches};
 use e2d2::native::zcsi::*;
-use e2d2::interface::PmdPort;
+use e2d2::interface::{PmdPort,PortQueue};
 use e2d2::scheduler::initialize_system;
+use e2d2::scheduler::StandaloneScheduler;
+use e2d2::allocators::CacheAligned;
+
 use tcp_proxy::Connection;
 use tcp_proxy::nftcp::setup_kni;
 use tcp_proxy::read_proxy_config;
 use tcp_proxy::get_mac_from_ifname;
 use tcp_proxy::print_hard_statistics;
-use tcp_proxy::SetupPipelines;
 use tcp_proxy::Container;
 use tcp_proxy::L234Data;
 use tcp_proxy::MessageFrom;
@@ -37,6 +39,8 @@ use tcp_proxy::spawn_recv_thread;
 use tcp_proxy::PipelineId;
 use tcp_proxy::ConnectionStatistics;
 use tcp_proxy::ReleaseCause;
+use tcp_proxy::setup_pipelines;
+use std::collections::HashSet;
 
 #[test]
 fn delayed_binding_proxy() {
@@ -139,14 +143,14 @@ fn delayed_binding_proxy() {
             let boxed_fss = Arc::new(f_select_server);
             let boxed_fpp = Arc::new(f_process_payload_c_s);
 
-            let setup_pipeline_cloner = SetupPipelines {
-                proxy_engine_config: proxy_config_cloned,
-                f_select_server: boxed_fss,
-                f_process_payload_c_s: boxed_fpp,
-                tx: mtx.clone(),
-            };
+            let mtx_clone = mtx.clone();
 
-            context.add_pipeline_to_run(setup_pipeline_cloner);
+            context.add_pipeline_to_run(
+                Box::new(move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
+                    setup_pipelines(core, p, s, &proxy_config_cloned, boxed_fss.clone(), boxed_fpp.clone(), mtx_clone.clone());
+                }
+                )
+            );
             spawn_recv_thread(mrx, sum_tx);
             context.execute();
 

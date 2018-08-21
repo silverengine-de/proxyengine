@@ -1,34 +1,35 @@
-extern crate tcp_proxy;
-// Logging
-#[macro_use]
-extern crate log;
 extern crate ctrlc;
 extern crate e2d2;
 extern crate env_logger;
+// Logging
+#[macro_use]
+extern crate log;
+extern crate tcp_proxy;
 
+use e2d2::config::{basic_opts, read_matches};
+use e2d2::interface::{PmdPort, PortType, PortQueue};
+use e2d2::native::zcsi::*;
+use e2d2::scheduler::{initialize_system, NetBricksContext, StandaloneScheduler};
+use e2d2::allocators::CacheAligned;
+
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::env;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::env;
-use std::time::Duration;
-use std::thread;
 use std::sync::mpsc::channel;
-use std::collections::HashMap;
-
-use e2d2::native::zcsi::*;
-use e2d2::scheduler::{initialize_system, NetBricksContext};
-use e2d2::interface::{PmdPort, PortType};
-use e2d2::config::{basic_opts, read_matches};
-
-use tcp_proxy::nftcp::setup_kni;
+use std::thread;
+use std::time::Duration;
+use tcp_proxy::{get_mac_from_ifname, print_hard_statistics, read_proxy_config, setup_pipelines};
 use tcp_proxy::Connection;
-use tcp_proxy::{get_mac_from_ifname, print_hard_statistics, read_proxy_config, SetupPipelines};
+use tcp_proxy::ConnectionStatistics;
 use tcp_proxy::Container;
+use tcp_proxy::errors::*;
 use tcp_proxy::L234Data;
 use tcp_proxy::MessageFrom;
-use tcp_proxy::errors::*;
-use tcp_proxy::spawn_recv_thread;
+use tcp_proxy::nftcp::setup_kni;
 use tcp_proxy::PipelineId;
-use tcp_proxy::ConnectionStatistics;
+use tcp_proxy::spawn_recv_thread;
 
 pub fn main() {
     env_logger::init();
@@ -161,70 +162,71 @@ pub fn main() {
     match initialize_system(&mut configuration)
         .map_err(|e| e.into())
         .and_then(|ctxt| check_system(ctxt))
-    {
-        Ok(mut context) => {
-            print_hard_statistics(1u16);
-            context.start_schedulers();
+        {
+            Ok(mut context) => {
+                print_hard_statistics(1u16);
+                context.start_schedulers();
 
-            let (mtx, mrx) = channel::<MessageFrom>();
-            let (sum_tx, _sum_rx) = channel::<HashMap<PipelineId, Arc<ConnectionStatistics>>>();
+                let (mtx, mrx) = channel::<MessageFrom>();
+                let (sum_tx, _sum_rx) = channel::<HashMap<PipelineId, Arc<ConnectionStatistics>>>();
 
-            let proxy_config_cloned = proxy_config.clone();
-            let boxed_fss = Arc::new(f_select_server);
-            let boxed_fpp = Arc::new(f_process_payload_c_s);
+                let proxy_config_cloned = proxy_config.clone();
+                let boxed_fss = Arc::new(f_select_server);
+                let boxed_fpp = Arc::new(f_process_payload_c_s);
 
-            let setup_pipeline_cloner = SetupPipelines {
-                proxy_engine_config: proxy_config_cloned,
-                f_select_server: boxed_fss,
-                f_process_payload_c_s: boxed_fpp,
-                tx: mtx.clone(),
-            };
+                let mtx_clone = mtx.clone();
 
-            context.add_pipeline_to_run(setup_pipeline_cloner);
-            spawn_recv_thread(mrx, sum_tx);
-            context.execute();
-
-            // set up kni
-            debug!("Number of PMD ports: {}", PmdPort::num_pmd_ports());
-            for port in context.ports.values() {
-                debug!(
-                    "port {}:{} -- mac_address= {}",
-                    port.port_type(),
-                    port.port_id(),
-                    port.mac_address()
+                context.add_pipeline_to_run(
+                    Box::new(move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
+                        setup_pipelines(core, p, s, &proxy_config_cloned, boxed_fss.clone(), boxed_fpp.clone(), mtx_clone.clone());
+                    }
+                    )
                 );
-                if port.is_kni() {
-                    setup_kni(
-                        port.linux_if().unwrap(),
-                        &proxy_config.proxy.ipnet,
-                        &proxy_config.proxy.mac,
-                        &proxy_config.proxy.namespace,
-                    );
-                }
-            }
-            //main loop
-            println!("press ctrl-c to terminate proxy ...");
-            while running.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
-            }
-            print_hard_statistics(1u16);
 
-            for port in context.ports.values() {
-                println!("Port {}:{}", port.port_type(), port.port_id());
-                port.print_soft_statistics();
+                spawn_recv_thread(mrx, sum_tx);
+                context.execute();
+
+                // set up kni
+                debug!("Number of PMD ports: {}", PmdPort::num_pmd_ports());
+                for port in context.ports.values() {
+                    debug!(
+                        "port {}:{} -- mac_address= {}",
+                        port.port_type(),
+                        port.port_id(),
+                        port.mac_address()
+                    );
+                    if port.is_kni() {
+                        setup_kni(
+                            port.linux_if().unwrap(),
+                            &proxy_config.proxy.ipnet,
+                            &proxy_config.proxy.mac,
+                            &proxy_config.proxy.namespace,
+                        );
+                    }
+                }
+                //main loop
+                println!("press ctrl-c to terminate proxy ...");
+                while running.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
+                }
+                print_hard_statistics(1u16);
+
+                for port in context.ports.values() {
+                    println!("Port {}:{}", port.port_type(), port.port_id());
+                    port.print_soft_statistics();
+                }
+                println!("terminating ProxyEngine ...");
+                mtx.send(MessageFrom::Exit).unwrap();
+                context.stop();
+                thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
+                std::process::exit(0);
             }
-            println!("terminating ProxyEngine ...");
-            mtx.send(MessageFrom::Exit).unwrap();
-            context.stop();
-            thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
-            std::process::exit(0);
-        }
-        Err(ref e) => {
-            error!("Error: {}", e);
-            if let Some(backtrace) = e.backtrace() {
-                debug!("Backtrace: {:?}", backtrace);
+            Err(ref e) => {
+                error!("Error: {}", e);
+                if let Some(backtrace) = e.backtrace() {
+                    debug!("Backtrace: {:?}", backtrace);
+                }
+                std::process::exit(1);
             }
-            std::process::exit(1);
         }
-    }
 }
