@@ -318,33 +318,6 @@ pub fn setup_pipelines<F1, F2>(
     );
 }
 
-pub struct SetupPipelines<F1, F2>
-where
-    F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
-    F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + Sync + 'static,
-{
-    pub proxy_engine_config: ProxyEngineConfig,
-    pub f_select_server: Arc<F1>,
-    pub f_process_payload_c_s: Arc<F2>,
-    pub tx: Sender<MessageFrom>,
-}
-
-impl<F1, F2> ClosureCloner<HashSet<CacheAligned<PortQueue>>> for SetupPipelines<F1, F2>
-where
-    F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
-    F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + Sync + 'static,
-{
-    fn get_clone(&self) -> Box<Fn(i32, HashSet<CacheAligned<PortQueue>>, &mut StandaloneScheduler) + Send> {
-        let pec = self.proxy_engine_config.clone();
-        let fss = self.f_select_server.clone();
-        let fpp = self.f_process_payload_c_s.clone();
-        let txx = self.tx.clone();
-        Box::new(move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
-            setup_pipelines(core, p, s, &pec, fss.clone(), fpp.clone(), txx.clone());
-        })
-    }
-}
-
 fn print_statistics(statistics: &HashMap<PipelineId, Arc<ConnectionStatistics>>) {
     statistics.iter().for_each(|entry| {
         println!("{}: {}", entry.0, entry.1);
