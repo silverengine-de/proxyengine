@@ -12,6 +12,7 @@ fi
 case $TASK in
     test_tcp_proxy)
         export RUST_LOG="tcp_proxy=info,test_tcp_proxy=info,e2d2=info"
+        export RUST_BACKTRACE=1
         executable=`cargo test $2 --no-run --message-format=json --test test_tcp_proxy | jq -r 'select((.profile.test == true) and (.target.name == "test_tcp_proxy")) | .filenames[]'`
         echo $executable
         sudo -E env "PATH=$PATH" $executable --nocapture

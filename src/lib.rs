@@ -9,31 +9,34 @@ extern crate env_logger;
 extern crate fnv;
 extern crate rand;
 extern crate toml;
+extern crate separator;
 #[macro_use]
 extern crate serde_derive;
 extern crate eui48;
 extern crate ipnet;
 extern crate serde;
+extern crate uuid;
 #[macro_use]
 extern crate error_chain;
 
 pub mod nftcp;
-pub use cmanager::{Connection, L234Data, ReleaseCause, UserData};
-pub use channel::{MessageFrom, MessageTo};
+
+pub use cmanager::{Connection, L234Data, ReleaseCause, UserData, ConRecord, TcpState};
 
 pub mod errors;
-mod channel;
 mod cmanager;
 mod timer_wheel;
 
 use ipnet::Ipv4Net;
 use eui48::MacAddress;
+use uuid::Uuid;
+use separator::Separatable;
 
 use e2d2::native::zcsi::*;
 use e2d2::common::ErrorKind as E2d2ErrorKind;
 use e2d2::scheduler::*;
 use e2d2::allocators::CacheAligned;
-use e2d2::interface::PortQueue;
+use e2d2::interface::{PortQueue, PmdPort};
 
 use errors::*;
 use nftcp::*;
@@ -52,8 +55,9 @@ use std::sync::mpsc::Receiver;
 use std::thread;
 use std::time::Duration;
 use std::sync::mpsc::RecvTimeoutError;
-pub use channel::PipelineId;
-pub use channel::ConnectionStatistics;
+use std::fmt;
+use std::cmp::Ordering;
+
 use timer_wheel::{duration_to_micros, duration_to_millis};
 
 #[derive(Deserialize)]
@@ -298,12 +302,19 @@ pub fn setup_pipelines<F1, F2>(
         panic!("need one kni port for queue 0");
     }
 
+    let uuid = Uuid::new_v4();
+    let name = String::from("KniHandleRequest");
+
     if is_kni_core(pci.unwrap()) {
-        sched
-            .add_task(KniHandleRequest {
-                kni_port: kni.unwrap().port.clone(),
-            })
-            .unwrap();
+        sched.add_runnable(
+            Runnable::from_task(
+                uuid,
+                name,
+                KniHandleRequest {
+                    kni_port: kni.unwrap().port.clone(),
+                },
+            ).ready(), // this task must be ready from the beginning to enable managing the KNI i/f
+        );
     }
 
     setup_forwarder(
@@ -318,59 +329,242 @@ pub fn setup_pipelines<F1, F2>(
     );
 }
 
-fn print_statistics(statistics: &HashMap<PipelineId, Arc<ConnectionStatistics>>) {
-    statistics.iter().for_each(|entry| {
-        println!("{}: {}", entry.0, entry.1);
-    });
+#[derive(Clone, PartialEq, Eq, Hash, Default)]
+pub struct PipelineId {
+    pub core: u16,
+    pub port_id: u16,
+    pub rxq: u16,
 }
 
-pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, sum_tx: Sender<HashMap<PipelineId, Arc<ConnectionStatistics>>>) {
-    let handle = thread::spawn(move || {
+impl fmt::Display for PipelineId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "<c{}, p{}, rx{}>", self.core, self.port_id, self.rxq)
+    }
+}
+
+#[derive(Debug)]
+pub enum TaskType {
+    TcpGenerator = 0,
+    Pipe2Kni = 1,
+    Pipe2Pci = 2,
+    NoTaskTypes = 3, // for iteration over TaskType
+}
+
+pub enum MessageFrom {
+    Channel(PipelineId, Sender<MessageTo>),
+    CRecord(PipelineId, ConRecord),
+    ClientSyn(PipelineId, ConRecord),
+    Established(PipelineId, ConRecord),
+    GenTimeStamp(PipelineId, u64, u64, u64),
+    // generator timestamps : pipeline, count of sent syn, tsc-value
+    StartEngine(Sender<MessageTo>),
+    Task(PipelineId, Uuid, TaskType),
+    PrintPerformance(Vec<i32>),
+    // performance for the cores selected by the indices
+    Exit, // exit recv thread
+}
+
+pub enum MessageTo {
+    Hello,
+    ConRecords(Vec<(PipelineId, ConRecord)>),
+    Exit, // exit recv thread
+}
+
+pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksContext, configuration: ProxyEngineConfig) {
+    /*
+        mrx: receiver for messages from all the pipelines running
+    */
+    let _handle = thread::spawn(move || {
         let mut senders = HashMap::new();
-        let mut statistics = HashMap::new();
-        let mut n_connections = 0u64;
+        let mut tasks: Vec<Vec<(PipelineId, Uuid)>> = Vec::with_capacity(TaskType::NoTaskTypes as usize);
+        let mut con_records: Vec<(PipelineId, ConRecord)> = Vec::with_capacity(5000);
+        let mut reply_to_main = None;
+
+        for _t in 0..TaskType::NoTaskTypes as usize {
+            tasks.push(Vec::<(PipelineId, Uuid)>::with_capacity(16));
+        }
+        context.execute_schedulers();
+
+        // set up kni
+        debug!("Number of PMD ports: {}", PmdPort::num_pmd_ports());
+        for port in context.ports.values() {
+            debug!(
+                "port {}:{} -- mac_address= {}",
+                port.port_type(),
+                port.port_id(),
+                port.mac_address()
+            );
+            if port.is_kni() {
+                setup_kni(
+                    port.linux_if().unwrap(),
+                    &configuration.proxy.ipnet,
+                    &configuration.proxy.mac,
+                    &configuration.proxy.namespace,
+                );
+            }
+        }
+
         loop {
             match mrx.recv_timeout(Duration::from_millis(60000)) {
+                Ok(MessageFrom::StartEngine(reply_channel)) => {
+                    reply_to_main = Some(reply_channel);
+                    // distribute message to all pipelines
+                    debug!("received StartEngine");
+                    /*
+                    for t in 0..TaskType::NoTaskTypes as usize {
+                        debug!("starting tasks {:?}", t);
+                        for (pipeline_id, uuid) in &tasks[t] {
+                            let sync_sender = context.scheduler_channels.get(&(pipeline_id.core as i32));
+                            if sync_sender.is_some() {
+                                sync_sender.unwrap().send(SchedulerCommand::SetTaskState(uuid.clone(), true)).unwrap();
+                            }
+                        }
+                    } */
+                    for s in &context.scheduler_channels {
+                        s.1.send(SchedulerCommand::SetTaskStateAll(true)).unwrap();
+                    }
+                }
+                Ok(MessageFrom::PrintPerformance(indices)) => {
+                    for i in &indices {
+                        context
+                            .scheduler_channels
+                            .get(i)
+                            .unwrap()
+                            .send(SchedulerCommand::SetTaskStateAll(false))
+                            .unwrap();
+                        context
+                            .scheduler_channels
+                            .get(i)
+                            .unwrap()
+                            .send(SchedulerCommand::GetPerformance)
+                            .unwrap();
+                    }
+                }
+                Ok(MessageFrom::Task(pipeline_id, uuid, task_type)) => {
+                    debug!("{}: task uuid= {}, type={:?}", pipeline_id, uuid, task_type);
+                    tasks[task_type as usize].push((pipeline_id, uuid));
+                }
+                Ok(MessageFrom::GenTimeStamp(pipeline_id, syn_count, tsc0, tsc1)) => info!(
+                    "pipe {}: GenTimeStamp -> count= {}, tsc0= {}, tsc1= {}",
+                    pipeline_id,
+                    syn_count,
+                    tsc0.separated_string(),
+                    tsc1.separated_string(),
+                ),
                 Ok(MessageFrom::Channel(pipeline_id, sender)) => {
                     debug!("got sender from {}", pipeline_id);
                     sender.send(MessageTo::Hello).unwrap();
                     senders.insert(pipeline_id, sender);
                 }
-                Ok(MessageFrom::Statistics(pipeline_id, c_statistics)) => {
-                    debug!("got statistics from {}", pipeline_id);
-                    statistics.insert(pipeline_id.clone(), c_statistics.clone());
-                }
                 Ok(MessageFrom::Exit) => {
+                    debug!("received Exit");
+                    print_hard_statistics(1u16);
+
+                    for port in context.ports.values() {
+                        println!("Port {}:{}", port.port_type(), port.port_id());
+                        port.print_soft_statistics();
+                    }
+                    println!("Connection Records ...");
+                    let cmp = |a: &(PipelineId, ConRecord), b: &(PipelineId, ConRecord)| {
+                        let ordering= a.1.client_sock.ip().cmp(b.1.client_sock.ip());
+                        if ordering==Ordering::Equal {
+                            a.1.client_sock.port().cmp(&b.1.client_sock.port())
+                        } else { ordering }
+                    };
+                    con_records.sort_by(cmp);
+                    for (p,con_record) in &con_records {
+                        info!(
+                            "CRecord: pipe {}, c-sock={}, p_port= {}, hold = {:12} cy, c/s-setup = {:8} cy/{:8} cy, {}, c/s_state = {:?}/{:?}, rc = {:?}",
+                            p,
+                            con_record.client_sock,
+                            con_record.p_port,
+                            con_record.con_hold,
+                            con_record.c_ack_recv - con_record.c_syn_recv,
+                            con_record.s_ack_sent - con_record.s_syn_sent,
+                            con_record.server_id,
+                            con_record.c_state,
+                            con_record.s_state,
+                            con_record.get_release_cause(),
+                        );
+                    }
+                    if reply_to_main.is_some() { reply_to_main.unwrap().send(MessageTo::ConRecords(con_records)).unwrap(); }
+                    context.stop();
+                    /*
                     senders.values().for_each(|ref tx| {
                         tx.send(MessageTo::Exit).unwrap();
                     });
+                    // give receivers time to read the Exit message before closing the channel
+                    thread::sleep(Duration::from_millis(200 as u64));
+                    */
                     break;
                 }
-                Ok(MessageFrom::CRecord(pipeline_id, con_record)) => {
-                    n_connections += 1;
-                    info!(
-                        "from {}: # {:7}, p_port= {}, hold = {:6} ms, c-setup = {:6} us, s-setup = {:6} us, {}, s_state = {:?}, rc = {:?}",
-                        pipeline_id,
-                        n_connections,
+                Ok(MessageFrom::CRecord(pipe, con_record)) => {
+                    debug!(
+                        "CRecord: pipe {}, p_port= {}, hold = {:12} cy, c/s-setup = {:8} cy/{:8} cy, {}, c/s_state = {:?}/{:?}, rc = {:?}",
+                        pipe,
                         con_record.p_port,
-                        duration_to_millis(&con_record.con_hold),
-                        duration_to_micros(&(con_record.c_ack_recv - con_record.c_syn_recv)),
-                        duration_to_micros(&(con_record.s_ack_sent - con_record.s_syn_sent)),
+                        con_record.con_hold,
+                        con_record.c_ack_recv - con_record.c_syn_recv,
+                        con_record.s_ack_sent - con_record.s_syn_sent,
                         con_record.server_id,
-                        con_record.last_s_state,
+                        con_record.c_state,
+                        con_record.s_state,
                         con_record.get_release_cause(),
                     );
+                    con_records.push((pipe, con_record));
+                }
+                Ok(MessageFrom::ClientSyn(pipe, con_record)) => {
+                    debug!(
+                        "ClientSyn: pipe {}: p_port= {}, c-sock={}",
+                        pipe,
+                        con_record.p_port,
+                        con_record.client_sock,
+                    );
+                    con_records.push((pipe, con_record));
+                }
+                Ok(MessageFrom::Established(pipe, con_record)) => {
+                    debug!(
+                        "Established: pipe {}: p_port= {}, c-sock={},  c/s-setup = {:8} cy/{:8} cy, {} ",
+                        pipe,
+                        con_record.p_port,
+                        con_record.client_sock,
+                        con_record.c_ack_recv - con_record.c_syn_recv,
+                        con_record.s_ack_sent - con_record.s_syn_sent,
+                        con_record.server_id,
+                    );
+                    con_records.push((pipe, con_record));
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(e) => {
                     error!("error receiving from message channel: {}", e);
                     break;
                 }
-                _ => warn!("illegal message"),
+                //_ => warn!("illegal message"),
+            }
+            match context
+                .reply_receiver
+                .as_ref()
+                .unwrap()
+                .recv_timeout(Duration::from_millis(10))
+            {
+                Ok(SchedulerReply::PerformanceData(core, map)) => {
+                    for d in map {
+                        info!(
+                            "{:2}: {:20} {:>15} count= {:12}",
+                            core,
+                            (d.1).0,
+                            (d.1).1.separated_string(),
+                            (d.1).2.separated_string(),
+                        )
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(e) => {
+                    error!("error receiving from SchedulerReply channel: {}", e);
+                    break;
+                }
             }
         }
-        print_statistics(&statistics);
-        sum_tx.send(statistics).unwrap();
         info!("exiting recv thread ...");
     });
 }

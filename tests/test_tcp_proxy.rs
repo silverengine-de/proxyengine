@@ -16,31 +16,28 @@ use std::io::Read;
 use std::io::Write;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc::channel;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashSet};
 
 use ipnet::Ipv4Net;
 
 use e2d2::config::{basic_opts, read_matches};
 use e2d2::native::zcsi::*;
-use e2d2::interface::PmdPort;
 use e2d2::interface::PortQueue;
 use e2d2::scheduler::initialize_system;
 use e2d2::scheduler::StandaloneScheduler;
 use e2d2::allocators::CacheAligned;
 
 use tcp_proxy::Connection;
-use tcp_proxy::nftcp::setup_kni;
 use tcp_proxy::read_proxy_config;
 use tcp_proxy::get_mac_from_ifname;
-use tcp_proxy::print_hard_statistics;
 use tcp_proxy::setup_pipelines;
 use tcp_proxy::Container;
 use tcp_proxy::L234Data;
-use tcp_proxy::MessageFrom;
+use tcp_proxy::{MessageFrom, MessageTo};
 use tcp_proxy::spawn_recv_thread;
-
-use tcp_proxy::PipelineId;
-use tcp_proxy::ConnectionStatistics;
+use tcp_proxy::ReleaseCause;
+use tcp_proxy::TcpState;
+use std::vec::Vec;
 
 #[test]
 fn delayed_binding_proxy() {
@@ -108,8 +105,7 @@ fn delayed_binding_proxy() {
             ip: u32::from(srv_cfg.ip),
             port: srv_cfg.port,
             server_id: srv_cfg.id.clone(),
-        })
-        .collect();
+        }).collect();
 
     let proxy_config_cloned = proxy_config.clone();
 
@@ -160,39 +156,29 @@ fn delayed_binding_proxy() {
             context.start_schedulers();
 
             let (mtx, mrx) = channel::<MessageFrom>();
-            let (sum_tx, _sum_rx) = channel::<HashMap<PipelineId, Arc<ConnectionStatistics>>>();
+            let (reply_mtx, reply_mrx) = channel::<MessageTo>();
 
             let proxy_config_cloned = proxy_config.clone();
-            let mtx_clone=mtx.clone();
+            let mtx_clone = mtx.clone();
             let boxed_fss = Arc::new(f_select_server);
             let boxed_fpp = Arc::new(f_process_payload_c_s);
 
-            context.add_pipeline_to_run(
-                Box::new(move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
-                setup_pipelines(core, p, s, &proxy_config_cloned, boxed_fss.clone(), boxed_fpp.clone(), mtx_clone.clone());}
-                )
-            );
-            spawn_recv_thread(mrx, sum_tx);
-            context.execute();
-
-            // set up kni
-            debug!("Number of PMD ports: {}", PmdPort::num_pmd_ports());
-            for port in context.ports.values() {
-                debug!(
-                    "port {}:{} -- mac_address= {}",
-                    port.port_type(),
-                    port.port_id(),
-                    port.mac_address()
-                );
-                if port.is_kni() {
-                    setup_kni(
-                        port.linux_if().unwrap(),
-                        &proxy_config.proxy.ipnet,
-                        &proxy_config.proxy.mac,
-                        &proxy_config.proxy.namespace,
+            context.add_pipeline_to_run(Box::new(
+                move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
+                    setup_pipelines(
+                        core,
+                        p,
+                        s,
+                        &proxy_config_cloned,
+                        boxed_fss.clone(),
+                        boxed_fpp.clone(),
+                        mtx_clone.clone(),
                     );
-                }
-            }
+                },
+            ));
+
+            spawn_recv_thread(mrx, context, proxy_config.clone());
+            mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
 
             // set up servers
             for server in proxy_config.servers {
@@ -207,7 +193,9 @@ fn delayed_binding_proxy() {
                             let mut buf = [0u8; 256];
                             stream.read(&mut buf[..]).unwrap();
                             debug!("server {} received: {}", id, String::from_utf8(buf.to_vec()).unwrap());
-                            stream.write(&format!("Thank You from {}", id).to_string().into_bytes()).unwrap();
+                            stream
+                                .write(&format!("Thank You from {}", id).to_string().into_bytes())
+                                .unwrap();
                         }
                     }
                     _ => {
@@ -224,7 +212,10 @@ fn delayed_binding_proxy() {
 
             for ntry in 0..proxy_config.queries.unwrap() {
                 match TcpStream::connect_timeout(
-                    &SocketAddr::from((proxy_config.proxy.ipnet.parse::<Ipv4Net>().unwrap().addr(), proxy_config.proxy.port)),
+                    &SocketAddr::from((
+                        proxy_config.proxy.ipnet.parse::<Ipv4Net>().unwrap().addr(),
+                        proxy_config.proxy.port,
+                    )),
                     timeout,
                 ) {
                     Ok(mut stream) => {
@@ -236,7 +227,9 @@ fn delayed_binding_proxy() {
                                 debug!("successfully send {} stars", ntry);
                                 let mut buf = [0u8; 256];
                                 match stream.read(&mut buf[..]) {
-                                    Ok(_) => info!("on try {} we received {}", ntry, String::from_utf8(buf.to_vec()).unwrap()),
+                                    Ok(_) => {
+                                        info!("on try {} we received {}", ntry, String::from_utf8(buf.to_vec()).unwrap())
+                                    }
                                     _ => {
                                         panic!("timeout on connection {} while waiting for answer", ntry);
                                     }
@@ -254,15 +247,31 @@ fn delayed_binding_proxy() {
             }
 
             thread::sleep(Duration::from_millis(500)); // Sleep for a bit
-            print_hard_statistics(1u16);
-            for port in context.ports.values() {
-                println!("Port {}:{}", port.port_type(), port.port_id());
-                port.print_soft_statistics();
+
+            mtx.send(MessageFrom::Exit).unwrap();
+            thread::sleep(Duration::from_millis(2000));
+
+            match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
+                Ok(MessageTo::ConRecords(con_records)) => {
+                    assert_eq!(con_records.len(), proxy_config.queries.unwrap());
+                    let mut completed_count = 0;
+                    for (p, c) in &con_records {
+                        if c.get_release_cause() == ReleaseCause::FinServer
+                            && c.c_state.last().unwrap() == &TcpState::Closed
+                            && c.s_state.last().unwrap() == &TcpState::Closed
+                        {
+                            completed_count += 1
+                        };
+                    }
+                    assert_eq!(completed_count, proxy_config.queries.unwrap());
+                }
+                Ok(m) => error!("illegal MessageTo received from reply_to_main channel"),
+                Err(e) => {
+                    error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
+                }
             }
 
             info!("terminating ProxyEngine ...");
-            mtx.send(MessageFrom::Exit).unwrap();
-            thread::sleep(Duration::from_millis(200));
             std::process::exit(0);
         }
         Err(ref e) => {
