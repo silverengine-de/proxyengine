@@ -26,8 +26,8 @@ toml = "0.4"
 serde = "1.0"
 serde_derive = "1.0"
 eui48 = { version= "0.3", features=["serde"] }
-error-chain = "0.11"
-uuid = { version = "0.6", features = ["v4"] }
+error-chain = ">=0.12"
+uuid = { version = ">=0.7", features = ["v4"] }
 separator =  ">= 0.3"
 
 [features]
