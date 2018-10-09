@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
 use std::thread;
 use std::time::Duration;
-use tcp_proxy::{get_mac_from_ifname, print_hard_statistics, read_proxy_config, setup_pipelines};
+use tcp_proxy::{get_mac_from_ifname, print_hard_statistics, read_config, setup_pipelines};
 use tcp_proxy::Connection;
 use tcp_proxy::Container;
 use tcp_proxy::errors::*;
@@ -52,7 +52,7 @@ pub fn main() {
         std::process::exit(1);
     }
 
-    let proxy_config = read_proxy_config(&config_file).unwrap();
+    let proxy_config = read_config(&config_file).unwrap();
 
     fn am_root() -> bool {
         match env::var("USER") {
@@ -91,15 +91,17 @@ pub fn main() {
     //  let (tx, rx) = channel::<TcpEvent>();
 
     let l234data: Vec<L234Data> = proxy_config
-        .servers
+        .targets
         .iter()
-        .map(|srv_cfg| L234Data {
+        .enumerate()
+        .map(|(i,srv_cfg)| L234Data {
             mac: srv_cfg
                 .mac
                 .unwrap_or_else(|| get_mac_from_ifname(srv_cfg.linux_if.as_ref().unwrap()).unwrap()),
             ip: u32::from(srv_cfg.ip),
             port: srv_cfg.port,
             server_id: srv_cfg.id.clone(),
+            index: i,
         }).collect();
 
     // this is the closure, which selects the target server to use for a new TCP connection

@@ -1,21 +1,10 @@
-use std::time::{Instant, Duration};
 use std::clone::Clone;
 use std::vec::Drain;
 use std::cmp::min;
 use std::fmt::Debug;
-use std::thread;
 use e2d2::utils;
 
 pub const MILLIS_TO_CYCLES:u64 = 2000000u64;
-
-
-pub fn duration_to_millis(dur: &Duration) -> u64 {
-    dur.as_secs() * 1000 + (dur.subsec_nanos() / 1000000) as u64
-}
-
-pub fn duration_to_micros(dur: &Duration) -> u64 {
-    dur.as_secs() * 1000 * 1000 + (dur.subsec_nanos() / 1000) as u64
-}
 
 pub struct TimerWheel<T>
 where
@@ -99,6 +88,8 @@ where
 
 mod tests {
     use super::*;
+    use std::time::Duration;
+    use std::thread;
 
     #[test]
     fn event_timing() {
@@ -124,7 +115,7 @@ mod tests {
                     }
                     else { assert!(false); }; // there must be one event in each slot
                 }
-                (None, more) => (),
+                (None, _more) => (),
             }
         }
         // test that wheel overflow does not break the code:

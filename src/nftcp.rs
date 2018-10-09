@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::cmp::min;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::process::Command;
-use std::sync::mpsc::{channel, Sender, TryRecvError};
+use std::sync::mpsc::Sender;
 
 use eui48::MacAddress;
 use ipnet::Ipv4Net;
@@ -20,8 +20,8 @@ use uuid::Uuid;
 use rand;
 use cmanager::*;
 use timer_wheel::TimerWheel;
-use ProxyEngineConfig;
-use { PipelineId, MessageFrom, MessageTo, TaskType };
+use Configuration;
+use { PipelineId, MessageFrom, TaskType };
 use timer_wheel::MILLIS_TO_CYCLES;
 
 const MIN_FRAME_SIZE: usize = 60; // without fcs
@@ -129,7 +129,7 @@ pub fn setup_forwarder<F1, F2>(
     pci: &CacheAligned<PortQueue>,
     kni: &CacheAligned<PortQueue>,
     sched: &mut StandaloneScheduler,
-    proxy_config: &ProxyEngineConfig,
+    proxy_config: &Configuration,
     f_select_server: Arc<F1>,
     f_process_payload_c_s: Arc<F2>,
     tx: Sender<MessageFrom>,
@@ -138,10 +138,11 @@ pub fn setup_forwarder<F1, F2>(
     F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + Sync + 'static,
 {
     let pd = L234Data {
-        mac: MacAddress::parse_str(&proxy_config.proxy.mac).unwrap(),
-        ip: u32::from(proxy_config.proxy.ipnet.parse::<Ipv4Net>().unwrap().addr()),
-        port: proxy_config.proxy.port,
+        mac: MacAddress::parse_str(&proxy_config.engine.mac).unwrap(),
+        ip: u32::from(proxy_config.engine.ipnet.parse::<Ipv4Net>().unwrap().addr()),
+        port: proxy_config.engine.port,
         server_id: "ProxyEngine".to_string(),
+        index: 0,
     };
 
     let pipeline_id = PipelineId {
@@ -187,22 +188,21 @@ pub fn setup_forwarder<F1, F2>(
         let name = String::from("Kni2Pci");
         sched.add_runnable(Runnable::from_task(uuid, name, forward2pci).ready());
     }
-    let thread_id_0 = format!("<c{}, rx{}>: ", core, pci.rxq());
-    let thread_id_1 = format!("<c{}, rx{}>: ", core, pci.rxq());
-    let thread_id_2 = format!("<c{}, rx{}>: ", core, pci.rxq());
 
+    let thread_id = format!("<c{}, rx{}>: ", core, pci.rxq());
     let pd_clone = pd.clone();
     // only accept traffic from PCI with matching L2 address
+    let thread_id_clone=thread_id.clone();
     let l2filter_from_pci = ReceiveBatch::new(pci.clone()).parse::<MacHeader>().filter(box move |p| {
         let header = p.get_header();
         if header.dst == pd_clone.mac {
-            //debug!("{} from pci: found mac: {} ", thread_id_0, &header);
+            //debug!("{} from pci: found mac: {} ", thread_id, &header);
             true
         } else if header.dst.is_multicast() || header.dst.is_broadcast() {
-            //debug!("{} from pci: multicast mac: {} ", thread_id_0, &header);
+            //debug!("{} from pci: multicast mac: {} ", thread_id, &header);
             true
         } else {
-            debug!("{} from pci: discarding because mac unknown: {} ", thread_id_0, &header);
+            debug!("{} from pci: discarding because mac unknown: {} ", thread_id_clone, &header);
             false
         }
     });
@@ -220,23 +220,17 @@ pub fn setup_forwarder<F1, F2>(
         box move |p| {
             let payload = p.get_payload();
             let ipflow = ipv4_extract_flow(payload);
-            if ipflow.is_none() {
-                debug!("{} not ip_flow", thread_id_1);
-                0
-            } else {
-                let ipflow = ipflow.unwrap();
-                if ipflow.dst_ip == pd_clone.ip && ipflow.proto == 6 {
-                    if ipflow.dst_port == pd_clone.port || ipflow.dst_port >= tcp_min_port {
-                        //debug!("{} proxy tcp flow: {}", thread_id_1, ipflow);
-                        1
-                    } else {
-                        //debug!("{} no proxy tcp flow: {}", thread_id_1, ipflow);
-                        0
-                    }
+            if ipflow.dst_ip == pd_clone.ip && ipflow.proto == 6 {
+                if ipflow.dst_port == pd_clone.port || ipflow.dst_port >= tcp_min_port {
+                    //debug!("{} proxy tcp flow: {}", thread_id_1, ipflow);
+                    1
                 } else {
-                    //debug!("{} ignored by proxy: not a tcp flow or not addressed to proxy", thread_id_1);
+                    //debug!("{} no proxy tcp flow: {}", thread_id_1, ipflow);
                     0
                 }
+            } else {
+                //debug!("{} ignored by proxy: not a tcp flow or not addressed to proxy", thread_id_1);
+                0
             }
         },
         sched,
@@ -429,10 +423,10 @@ pub fn setup_forwarder<F1, F2>(
                     let old_payload_size = c.payload.len();
                     f_select_server(c);
                     // save server_id to connection record
-                    c.con_rec.server_id = if c.server.is_some() {
-                        c.server.as_ref().unwrap().server_id.clone()
+                    c.con_rec.server_index = if c.server.is_some() {
+                        c.server.as_ref().unwrap().index
                     } else {
-                        String::from("<unselected>")
+                        0
                     };
 
                     c.c2s_inserted_bytes = c.payload.len() - old_payload_size;
@@ -570,7 +564,7 @@ pub fn setup_forwarder<F1, F2>(
                         c.client_con_established();
                         debug!(
                             "{} client side connection established for {:?}",
-                            thread_id_2,
+                            thread_id,
                             hs_flow.src_socket_addr()
                         );
                     } else if hs.tcp.ack_flag() && old_s_state == TcpState::FinWait1 {
@@ -579,7 +573,7 @@ pub fn setup_forwarder<F1, F2>(
                         if hs.tcp.fin_flag() {
                             c.con_rec.c_state.push(TcpState::LastAck);
                         }
-                        debug!("{} transition to client/server state {:?}/{:?}", thread_id_2, c.con_rec.c_state, c.con_rec.s_state);
+                        debug!("{} transition to client/server state {:?}/{:?}", thread_id, c.con_rec.c_state, c.con_rec.s_state);
                     } else if old_s_state == TcpState::LastAck && hs.tcp.ack_flag() || old_c_state == TcpState::FinWait2 {
                         // received final ack from client for client initiated close
                         debug!(
@@ -635,7 +629,7 @@ pub fn setup_forwarder<F1, F2>(
                     } else if old_s_state < TcpState::SynReceived || old_c_state < TcpState::Established {
                         warn!(
                             "{} unexpected client-side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
-                            thread_id_2,
+                            thread_id,
                             hs.tcp.src_port(),
                             c.p_port(),
                             c.con_rec.c_state,
@@ -711,7 +705,7 @@ pub fn setup_forwarder<F1, F2>(
                         if b_unexpected {
                             warn!(
                                 "{} unexpected server side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
-                                thread_id_2,
+                                thread_id,
                                 hs.tcp.dst_port(),
                                 c.get_client_sock().port(),
                                 c.con_rec.c_state,

@@ -1,4 +1,3 @@
-use std::time::{Duration, Instant};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
@@ -15,7 +14,7 @@ use e2d2::utils;
 use eui48::MacAddress;
 use {MessageFrom, PipelineId};
 use timer_wheel::{TimerWheel, MILLIS_TO_CYCLES};
-use {ProxyEngineConfig, Timeouts};
+use {Configuration, Timeouts};
 
 use fnv::FnvHasher;
 
@@ -40,6 +39,7 @@ pub struct L234Data {
     pub ip: u32,
     pub port: u16,
     pub server_id: String,
+    pub index: usize,   // index of this struct in a Vec
 }
 
 pub trait UserData: Send + Sync + 'static {
@@ -100,7 +100,7 @@ pub struct ConRecord {
     pub con_hold: u64,
     pub c_state: Vec<TcpState>,
     pub s_state: Vec<TcpState>,
-    pub server_id: String,
+    pub server_index: usize,
     release_cause: ReleaseCause,
 }
 
@@ -114,8 +114,9 @@ impl ConRecord {
         self.client_sock = client_sock;
         self.c_state.clear();
         self.c_state.push(TcpState::Closed);
+        self.s_state.clear();
         self.s_state.push(TcpState::Listen); // server starts with Listen
-        self.server_id.clear();
+        self.server_index =0;
     }
     #[inline]
     pub fn released(&mut self, cause: ReleaseCause) {
@@ -137,7 +138,7 @@ impl ConRecord {
             con_hold: 0u64,
             c_state: Vec::with_capacity(8),
             s_state: Vec::with_capacity(8),
-            server_id: String::new(),
+            server_index: 0,
             release_cause: ReleaseCause::Unknown,
             p_port: 0u16,
         }
@@ -250,7 +251,7 @@ pub struct ConnectionManager {
     port2con: Vec<Connection>,
     timeouts: Timeouts,
     pci: CacheAligned<PortQueue>, // the PortQueue for which connections are managed
-    proxy_data: L234Data,
+    //proxy_data: L234Data,
     pipeline_id: PipelineId,
     tx: Sender<MessageFrom>,
     tcp_port_base: u16,
@@ -267,7 +268,7 @@ impl ConnectionManager {
         pipeline_id: PipelineId,
         pci: CacheAligned<PortQueue>,
         proxy_data: L234Data,
-        proxy_config: ProxyEngineConfig,
+        proxy_config: Configuration,
         tx: Sender<MessageFrom>,
     ) -> ConnectionManager {
         let old_manager_count: u16 = GLOBAL_MANAGER_COUNT.fetch_add(1, Ordering::SeqCst) as u16;
@@ -282,9 +283,9 @@ impl ConnectionManager {
             sock2port: HashMap::<SocketAddrV4, u16, FnvHash>::with_hasher(Default::default()),
             port2con: vec![Connection::new(); (!port_mask + 1) as usize],
             free_ports: (tcp_port_base..max_tcp_port).collect(),
-            timeouts: Timeouts::default_or_some(&proxy_config.proxy.timeouts),
+            timeouts: Timeouts::default_or_some(&proxy_config.engine.timeouts),
             pci,
-            proxy_data,
+            //proxy_data,
             pipeline_id,
             tx,
             tcp_port_base,
@@ -375,7 +376,6 @@ impl ConnectionManager {
                 (Some(mut drain), more) => {
                     let mut port = drain.next();
                     while port.is_some() {
-                        //self.check_timeout(&port.unwrap());
                         let p = port.unwrap();
                         // TODO convert ms to cycles more precisely
                         let timeout = self.timeouts.established.unwrap_or(200)*MILLIS_TO_CYCLES;

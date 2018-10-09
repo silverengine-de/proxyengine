@@ -14,9 +14,9 @@ vdev        = [ "net_kni0" ]    # for use of vdev with KNI PMD, see https://dpdk
 
 [proxyengine]
 
-proxy       = { namespace="nskni", mac="8e:f7:35:7e:73:91", ipnet="192.168.222.1/24", port=999 }
+engine      = { namespace="nskni", mac="8e:f7:35:7e:73:91", ipnet="192.168.222.1/24", port=999 }
 # select non exiting server addresses for the timeout test
-servers     = [ { id = "server 1", ip = "192.168.222.244", linux_if="enp7s0f1" , port = 12345 },
+targets     = [ { id = "server 1", ip = "192.168.222.244", linux_if="enp7s0f1" , port = 12345 },
                 { id = "server 2", ip = "192.168.222.244", linux_if="enp7s0f1" , port = 12346 },
               ]
-queries     = 30
+test_size   = 30

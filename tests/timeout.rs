@@ -27,7 +27,7 @@ use e2d2::scheduler::{initialize_system, StandaloneScheduler};
 use e2d2::allocators::CacheAligned;
 
 use tcp_proxy::Connection;
-use tcp_proxy::read_proxy_config;
+use tcp_proxy::read_config;
 use tcp_proxy::get_mac_from_ifname;
 use tcp_proxy::setup_pipelines;
 use tcp_proxy::Container;
@@ -54,10 +54,10 @@ fn delayed_binding_proxy() {
         info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
     }
 
-    let proxy_config = read_proxy_config(toml_file).unwrap();
+    let proxy_config = read_config(toml_file).unwrap();
 
-    if proxy_config.queries.is_none() {
-        error!("missing parameter 'queries' in configuration file");
+    if proxy_config.test_size.is_none() {
+        error!("missing parameter 'test_size' in configuration file");
         std::process::exit(1);
     };
 
@@ -93,15 +93,17 @@ fn delayed_binding_proxy() {
     let mut configuration = read_matches(&matches, &opts);
 
     let l234data: Vec<L234Data> = proxy_config
-        .servers
+        .targets
         .iter()
-        .map(|srv_cfg| L234Data {
+        .enumerate()
+        .map(|(i,srv_cfg)| L234Data {
             mac: srv_cfg
                 .mac
-                .unwrap_or(get_mac_from_ifname(srv_cfg.linux_if.as_ref().unwrap()).unwrap()),
+                .unwrap_or_else(|| get_mac_from_ifname(srv_cfg.linux_if.as_ref().unwrap()).unwrap()),
             ip: u32::from(srv_cfg.ip),
             port: srv_cfg.port,
             server_id: srv_cfg.id.clone(),
+            index: i,
         }).collect();
 
     let proxy_config_cloned = proxy_config.clone();
@@ -113,7 +115,7 @@ fn delayed_binding_proxy() {
         let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
         let remainder = stars % l234data.len();
         c.server = Some(l234data[remainder].clone());
-        info!("selecting {}", proxy_config_cloned.servers[remainder].id);
+        info!("selecting {}", proxy_config_cloned.targets[remainder].id);
         // initialize userdata
         if let Some(_) = c.userdata {
             c.userdata.as_mut().unwrap().init();
@@ -157,16 +159,16 @@ fn delayed_binding_proxy() {
             mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
 
             // emulate clients
-            let queries = proxy_config.queries.unwrap();
+            let queries = proxy_config.test_size.unwrap();
             let proxy_addr = (
-                proxy_config.proxy.ipnet.parse::<Ipv4Net>().unwrap().addr(),
-                proxy_config.proxy.port,
+                proxy_config.engine.ipnet.parse::<Ipv4Net>().unwrap().addr(),
+                proxy_config.engine.port,
             );
             let timeout = Duration::from_millis(6000 as u64);
 
             const CLIENT_THREADS: usize = 10;
             for _i in 0..CLIENT_THREADS {
-                debug!("starting thread {} with {} queries", _i, queries);
+                debug!("starting thread {} with {} test_size", _i, queries);
                 thread::spawn(move || {
                     for ntry in 0..queries {
                         match TcpStream::connect(&SocketAddr::from(proxy_addr)) {
@@ -236,16 +238,16 @@ fn delayed_binding_proxy() {
 
             match reply_mrx.recv_timeout(Duration::from_millis(5000)) {
                 Ok(MessageTo::ConRecords(con_records)) => {
-                    assert_eq!(con_records.len(), proxy_config.queries.unwrap() * CLIENT_THREADS +1);
+                    assert_eq!(con_records.len(), proxy_config.test_size.unwrap() * CLIENT_THREADS +1);
                     let mut timeouts =0;
-                    for (p, c) in &con_records {
+                    for (_p, c) in &con_records {
                         if c.get_release_cause() == ReleaseCause::Timeout {
                             timeouts +=1;
                         }
                     }
-                    assert_eq!(timeouts, proxy_config.queries.unwrap() * CLIENT_THREADS);
+                    assert_eq!(timeouts, proxy_config.test_size.unwrap() * CLIENT_THREADS);
                 }
-                Ok(m) => error!("illegal MessageTo received from reply_to_main channel"),
+                Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
                 Err(e) => {
                     error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
                 }

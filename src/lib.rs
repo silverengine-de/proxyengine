@@ -58,22 +58,21 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::fmt;
 use std::cmp::Ordering;
 
-use timer_wheel::{duration_to_micros, duration_to_millis};
 
 #[derive(Deserialize)]
 struct Config {
-    proxyengine: ProxyEngineConfig,
+    proxyengine: Configuration,
 }
 
 #[derive(Deserialize, Clone)]
-pub struct ProxyEngineConfig {
-    pub servers: Vec<ProxyServerConfig>,
-    pub proxy: ProxyConfig,
-    pub queries: Option<usize>,
+pub struct Configuration {
+    pub targets: Vec<TargetConfig>,
+    pub engine: EngineConfig,
+    pub test_size: Option<usize>,
 }
 
 #[derive(Deserialize, Clone)]
-pub struct ProxyConfig {
+pub struct EngineConfig {
     pub namespace: String,
     pub mac: String,
     pub ipnet: String,
@@ -82,7 +81,7 @@ pub struct ProxyConfig {
 }
 
 #[derive(Deserialize, Clone)]
-pub struct ProxyServerConfig {
+pub struct TargetConfig {
     pub id: String,
     pub ip: Ipv4Addr,
     pub mac: Option<MacAddress>,
@@ -114,7 +113,7 @@ impl Timeouts {
     }
 }
 
-pub fn read_proxy_config(filename: &str) -> Result<ProxyEngineConfig> {
+pub fn read_config(filename: &str) -> Result<Configuration> {
     let mut toml_str = String::new();
     let _ = File::open(filename)
         .and_then(|mut f| f.read_to_string(&mut toml_str))
@@ -127,8 +126,8 @@ pub fn read_proxy_config(filename: &str) -> Result<ProxyEngineConfig> {
         Err(err) => return Err(err.into()),
     };
 
-    match config.proxyengine.proxy.ipnet.parse::<Ipv4Net>() {
-        Ok(_) => match config.proxyengine.proxy.mac.parse::<MacAddress>() {
+    match config.proxyengine.engine.ipnet.parse::<Ipv4Net>() {
+        Ok(_) => match config.proxyengine.engine.mac.parse::<MacAddress>() {
             Ok(_) => Ok(config.proxyengine),
             Err(e) => Err(e.into()),
         },
@@ -265,7 +264,7 @@ pub fn setup_pipelines<F1, F2>(
     core: i32,
     ports: HashSet<CacheAligned<PortQueue>>,
     sched: &mut StandaloneScheduler,
-    proxy_config: &ProxyEngineConfig,
+    proxy_config: &Configuration,
     f_select_server: Arc<F1>,
     f_process_payload_c_s: Arc<F2>,
     tx: Sender<MessageFrom>,
@@ -370,7 +369,7 @@ pub enum MessageTo {
     Exit, // exit recv thread
 }
 
-pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksContext, configuration: ProxyEngineConfig) {
+pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksContext, configuration: Configuration) {
     /*
         mrx: receiver for messages from all the pipelines running
     */
@@ -397,9 +396,9 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
             if port.is_kni() {
                 setup_kni(
                     port.linux_if().unwrap(),
-                    &configuration.proxy.ipnet,
-                    &configuration.proxy.mac,
-                    &configuration.proxy.namespace,
+                    &configuration.engine.ipnet,
+                    &configuration.engine.mac,
+                    &configuration.engine.namespace,
                 );
             }
         }
@@ -481,7 +480,7 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                             con_record.con_hold,
                             con_record.c_ack_recv - con_record.c_syn_recv,
                             con_record.s_ack_sent - con_record.s_syn_sent,
-                            con_record.server_id,
+                            con_record.server_index,
                             con_record.c_state,
                             con_record.s_state,
                             con_record.get_release_cause(),
@@ -506,7 +505,7 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                         con_record.con_hold,
                         con_record.c_ack_recv - con_record.c_syn_recv,
                         con_record.s_ack_sent - con_record.s_syn_sent,
-                        con_record.server_id,
+                        con_record.server_index,
                         con_record.c_state,
                         con_record.s_state,
                         con_record.get_release_cause(),
@@ -530,7 +529,7 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                         con_record.client_sock,
                         con_record.c_ack_recv - con_record.c_syn_recv,
                         con_record.s_ack_sent - con_record.s_syn_sent,
-                        con_record.server_id,
+                        con_record.server_index,
                     );
                     con_records.push((pipe, con_record));
                 }
