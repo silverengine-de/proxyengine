@@ -161,7 +161,7 @@ pub fn main() {
         .and_then(|ctxt| check_system(ctxt))
     {
         Ok(mut context) => {
-            print_hard_statistics(1u16);
+            unsafe { fdir_get_infos(1u16); }
             context.start_schedulers();
 
             let (mtx, mrx) = channel::<MessageFrom>();
