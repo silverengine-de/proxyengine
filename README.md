@@ -23,11 +23,11 @@ Note, that a local installation of NetBricks is necessary as it includes DPDK an
 
 ProxyEngine includes a main program bin.rs (using example configurations _\*.toml_) and test modules (using configurations _tests/\*.toml_). For both the network interfaces of the test machine need to be prepared (see [prepNet.sh](https://github.com/silverengine-de/proxyengine/blob/master/prepNet.sh)). 
 
-First a network interface for user-space DPDK is needed. This interface is used by the proxy to connect to clients and servers (in the example configuration this interface uses PCI slot 07:00.0). The latest code is tested with NIC X520-DA2 (82599) and previous single rx/tx versions with e1000e and vmxnet3.
+First a network interface for user-space DPDK is needed. This interface is used by the proxy to connect to clients and servers (in the example configuration this interface uses PCI slot 07:00.0). The latest code is tested with NIC X520-DA2 (82599) and previous single rx/tx versions with e1000e and vmxnet3. Please note that X710 based NICs currently cannot be used for ProxyEngine, because X710 does not allow for partial masking of TCP ports.
 
 Secondly an extra Linux interface is required which is used by the test modules for placing client and server stacks.
 
-Both interfaces must be interconnected. In case of virtual interfaces, e.g. interfaces may be connected to a host-only network of the hypervisor. Using Wireshark on this network allows us to observe the complete traffic exchange between clients, the proxy and the servers. In case of physical interfaces, interfaces my be connected by a cross over cable.
+Both interfaces must be interconnected. In case of virtual interfaces, e.g. interfaces may be connected to a host-only network of the hypervisor. In case of physical interfaces, interfaces may be interconnected by a cross over cable. Using Wireshark on the Linux interface allows us to observe the complete traffic exchange between clients, the proxy and the servers.
 
 In addition some parameters like the Linux interface name (linux_if) and the IP / MAC addresses in the test module configuration files  tests/*.toml need to be adapted. 
 
