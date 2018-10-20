@@ -12,6 +12,7 @@ vdev        = [ "net_kni0" ]    # for use of vdev with KNI PMD, see https://dpdk
 
 [proxyengine]
 
-engine      = { namespace="nskni", mac="8e:f7:35:7e:73:91", ipnet="192.168.222.1/24", port=19999, timeouts= { established= 1800 }  }
-targets     = [ { id = "iperf3", ip = "192.168.222.3", linux_if="enp7s0f1" , port = 5201 },
+engine       = { namespace="nskni", mac="3c:fd:fe:9e:ce:4c", ipnet="192.168.222.1/24", port=19999, timeouts= { established= 1800 }  }
+targets      = [ { id = "tcpgen_0", ip = "192.168.222.2", mac="8e:f7:35:7e:73:91" , port = 65535 },
+                 { id = "tcpgen_1", ip = "192.168.222.2", mac="8e:f7:35:7e:73:91" , port = 57343 },
               ]

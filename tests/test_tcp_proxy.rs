@@ -207,6 +207,8 @@ fn delayed_binding_proxy() {
 
             thread::sleep(Duration::from_millis(2000 as u64)); // wait for the servers
 
+            unsafe { fdir_get_infos(1u16); }
+            
             // emulate clients
 
             let timeout = Duration::from_millis(1000 as u64);

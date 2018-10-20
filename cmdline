@@ -1,0 +1,1 @@
+BOOT_IMAGE=/vmlinuz-3.10.0-862.14.4.el7.x86_64 root=/dev/mapper/helios--vg1-root ro crashkernel=auto rhgb quiet default_hugepagesz=1G hugepagesz=1G hugepages=8 intel_iommu=on iommu=pt LANG=en_US.utf8
