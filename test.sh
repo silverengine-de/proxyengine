@@ -1,5 +1,5 @@
 #!/bin/bash
-sudo ip addr add 192.168.222.3/24 dev enp7s0f1
+sudo ip addr add 192.168.222.3/24 dev ens2f1
 
 set -e
 
@@ -11,7 +11,7 @@ fi
 
 case $TASK in
     test_tcp_proxy)
-        export RUST_LOG="tcp_proxy=info,test_tcp_proxy=info,e2d2=info"
+        export RUST_LOG="tcp_proxy=debug,test_tcp_proxy=debug,e2d2=debug"
         export RUST_BACKTRACE=1
         executable=`cargo test $2 --no-run --message-format=json --test test_tcp_proxy | jq -r 'select((.profile.test == true) and (.target.name == "test_tcp_proxy")) | .filenames[]'`
         echo $executable

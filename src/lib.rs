@@ -215,18 +215,6 @@ pub fn print_hard_statistics(port_id: u16) -> i32 {
     retval
 }
 
-pub fn print_soft_statistics(port_id: u16) -> i32 {
-    let stats = RteEthStats::new();
-    let retval;
-    unsafe {
-        retval = rte_eth_stats_get(port_id, &stats as *const RteEthStats);
-    }
-    if retval == 0 {
-        println!("Port {}:\n{}\n", port_id, stats);
-    }
-    retval
-}
-
 pub fn print_xstatistics(port_id: u16) -> i32 {
     let len;
     unsafe {

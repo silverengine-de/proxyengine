@@ -446,7 +446,6 @@ pub fn setup_forwarder<F1, F2>(
                 h.tcp.unset_ack_flag();
                 h.tcp.unset_psh_flag();
                 update_tcp_checksum(p, h.ip.payload_size(0), h.ip.src(), h.ip.dst());
-                debug!("SYN packet to server - L3: {}, L4: {}", h.ip, p.get_header());
             }
 
             fn server_synack_received<M: Sized + Send>(
@@ -624,6 +623,7 @@ pub fn setup_forwarder<F1, F2>(
                         && old_s_state == TcpState::Listen {
                         // should be the first payload packet from client
                         select_server(p, &mut c, &mut hs, &pd, &f_select_server);
+                        debug!("{} SYN packet to server - L3: {}, L4: {}", thread_id, hs.ip, p.get_header());
                         c.con_rec.s_state.push(TcpState::SynReceived);
                         group_index = 1;
                     } else if old_s_state < TcpState::SynReceived || old_c_state < TcpState::Established {
@@ -649,7 +649,7 @@ pub fn setup_forwarder<F1, F2>(
             } else {
                 // should be server to client
                 {
-                    // debug!("looking up state for server side port { }", hs.tcp.dst_port());
+                    //debug!("looking up state for server side port { }", hs.tcp.dst_port());
                     let mut c = sm.get_mut(CKey::Port(hs.tcp.dst_port()));
                     if c.is_some() {
                         let mut c = c.as_mut().unwrap();
@@ -659,7 +659,7 @@ pub fn setup_forwarder<F1, F2>(
 
                         if old_s_state == TcpState::SynReceived && hs.tcp.ack_flag() && hs.tcp.syn_flag() {
                             c.server_con_established();
-                            debug!("established two-way client server connection, SYN-ACK received: L3: {}, L4: {}", hs.ip, hs.tcp);
+                            debug!("{} established two-way client server connection, SYN-ACK received: L3: {}, L4: {}", thread_id, hs.ip, hs.tcp);
                             // TODO statistics.full_connect();
                             server_synack_received(p, &mut c, &mut hs, &mut producer);
                             group_index = 0; // packets are sent via extra queue
@@ -714,7 +714,7 @@ pub fn setup_forwarder<F1, F2>(
                             group_index = 2;
                         }
                     } else {
-                        warn!("proxy has no state on port {}, sending to KNI i/f", hs.tcp.dst_port());
+                        warn!("{} proxy has no state on port {}, sending to KNI i/f", thread_id, hs.tcp.dst_port());
                         // we send this to KNI which handles out-of-order TCP, e.g. by sending RST
                         group_index = 2;
                     }
