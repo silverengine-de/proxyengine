@@ -11,7 +11,7 @@ It may be used for intelligent load-balancing and fire-walling of TCP based prot
 
 First benchmarking shows that ProxyEngine can forward about 1.3 million packets per second per physical core (of a rather old 4 core L5520 CPU @ 2.27GHz with 32K/256K/8192K L1/L2/L3 Cache). Do not forget to compile with --release flag for any benchmarking ;-)
 
-Scaling happens by distributing incoming client-side TCP connections using RSS over the cores and by steering the incoming server side TCP connections to the appropriate core based on the selected server side proxy-port. Therefore server-side port resources are assigned to cores (based on paramater _dst_port_mask_ in the configuration file).    
+Scaling happens by distributing incoming client-side TCP connections using RSS over the cores and by steering the incoming server side TCP connections to the appropriate core. This receive flow steering can be either based on the port or on the IP address of the server side connection (selected by parameter _flow_steering_ in the toml configuration file). In the first case port resources of the proxy are assigned to cores (based on paramater _dst_port_mask_ in the configuration file). In the second case each core uses a unique IP address for the server side connections.     
 
 ProxyEngine builds on [Netbricks](https://github.com/NetSys/NetBricks) which itself utilizes DPDK for user-space networking.
 
@@ -23,7 +23,7 @@ Note, that a local installation of NetBricks is necessary as it includes DPDK an
 
 ProxyEngine includes a main program bin.rs (using example configurations _\*.toml_) and test modules (using configurations _tests/\*.toml_). For both the network interfaces of the test machine need to be prepared (see [prepNet.sh](https://github.com/silverengine-de/proxyengine/blob/master/prepNet.sh)). 
 
-First a network interface for user-space DPDK is needed. This interface is used by the proxy to connect to clients and servers (in the example configuration this interface uses PCI slot 07:00.0). The latest code is tested with NIC X520-DA2 (82599) and previous single rx/tx versions with e1000e and vmxnet3. Please note that X710 based NICs currently cannot be used for ProxyEngine, because X710 does not allow for partial masking of TCP ports.
+First a network interface for user-space DPDK is needed. This interface is used by the proxy to connect to clients and servers (in the example configuration this interface uses PCI slot 07:00.0). The latest code is tested with NIC X520-DA2 (82599) and previous single rx/tx versions with e1000e and vmxnet3. Please note that X710 based NICs can only be used for ProxyEngine with IP address based RFS, because X710 does not allow for partial masking of TCP ports.
 
 Secondly an extra Linux interface is required which is used by the test modules for placing client and server stacks.
 

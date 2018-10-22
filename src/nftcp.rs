@@ -13,6 +13,7 @@ use std::cmp::min;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::process::Command;
 use std::sync::mpsc::Sender;
+use std::str::FromStr;
 
 use eui48::MacAddress;
 use ipnet::Ipv4Net;
@@ -43,7 +44,14 @@ pub fn is_kni_core(pci: &CacheAligned<PortQueue>) -> bool {
     pci.rxq() == 0
 }
 
-pub fn setup_kni(kni_name: &str, ip_address: &str, mac_address: &str, kni_netns: &str) {
+pub fn setup_kni(kni_name: &str, configuration: &Configuration, ip_address_count: usize) {
+    let ip_address=&configuration.engine.ipnet;
+    let ip_addr_first= Ipv4Net::from_str(ip_address).unwrap().addr();
+    let prefix_len= Ipv4Net::from_str(ip_address).unwrap().prefix_len();
+    let mac_address = &configuration.engine.mac;
+    let kni_netns= &configuration.engine.namespace;
+
+
     debug!("setup_kni");
     //# ip link set dev vEth1 address XX:XX:XX:XX:XX:XX
     let output = Command::new("ip")
@@ -88,20 +96,22 @@ pub fn setup_kni(kni_name: &str, ip_address: &str, mac_address: &str, kni_netns:
         output.status,
         String::from_utf8_lossy(&reply)
     );
-
-    // e.g. ip netns exec nskni ip addr add w.x.y.z/24 dev vEth1
-    let output = Command::new("ip")
-        .args(&["netns", "exec", kni_netns, "ip", "addr", "add", ip_address, "dev", kni_name])
-        .output()
-        .expect("failed to assign IP address to kni i/f");
-    let reply = output.stderr;
-    debug!(
-        "assigning IP addr {} to {}: {}, {}",
-        ip_address,
-        kni_name,
-        output.status,
-        String::from_utf8_lossy(&reply)
-    );
+    for i in 0..ip_address_count {
+        // e.g. ip netns exec nskni ip addr add w.x.y.z/24 dev vEth1
+        let ip_net = Ipv4Net::new(Ipv4Addr::from(u32::from(ip_addr_first) + i as u32), prefix_len).unwrap().to_string();
+        let output = Command::new("ip")
+            .args(&["netns", "exec", kni_netns, "ip", "addr", "add", &ip_net, "dev", kni_name])
+            .output()
+            .expect("failed to assign IP address to kni i/f");
+        let reply = output.stderr;
+        debug!(
+            "assigning IP addr {} to {}: {}, {}",
+            ip_net,
+            kni_name,
+            output.status,
+            String::from_utf8_lossy(&reply)
+        );
+    }
     // e.g. ip netns exec nskni ip link set dev vEth1 up
     let output1 = Command::new("ip")
         .args(&["netns", "exec", kni_netns, "ip", "link", "set", "dev", kni_name, "up"])
@@ -213,6 +223,8 @@ pub fn setup_forwarder<F1, F2>(
     let pipeline_id_clone = pipeline_id.clone();
     let uuid_l2groupby = Uuid::new_v4();
     let uuid_l2groupby_clone = uuid_l2groupby.clone();
+    let ip_src = sm.ip();
+    let thread_id_1=thread_id.clone();
     // group the traffic into TCP traffic addressed to Proxy (group 1),
     // and send all other traffic to KNI (group 0)
     let mut l2groups = l2filter_from_pci.group_by(
@@ -220,7 +232,7 @@ pub fn setup_forwarder<F1, F2>(
         box move |p| {
             let payload = p.get_payload();
             let ipflow = ipv4_extract_flow(payload);
-            if ipflow.dst_ip == pd_clone.ip && ipflow.proto == 6 {
+            if (ipflow.dst_ip == pd_clone.ip) || (ipflow.dst_ip == ip_src) && ipflow.proto == 6 {
                 if ipflow.dst_port == pd_clone.port || ipflow.dst_port >= tcp_min_port {
                     //debug!("{} proxy tcp flow: {}", thread_id_1, ipflow);
                     1
@@ -229,7 +241,7 @@ pub fn setup_forwarder<F1, F2>(
                     0
                 }
             } else {
-                //debug!("{} ignored by proxy: not a tcp flow or not addressed to proxy", thread_id_1);
+                debug!("{} sending to KNI: {}", thread_id_1, p.get_header());
                 0
             }
         },
@@ -314,10 +326,9 @@ pub fn setup_forwarder<F1, F2>(
                 h.tcp.set_seq_num(c.c_seqn);
                 update_tcp_checksum(p, h.ip.payload_size(0), h.ip.src(), h.ip.dst());
                 // debug!("checksum recalc = {:X}",p.get_header().checksum());
-                debug!("(SYN-)ACK to client, L3: { }, L4: { }", h.ip, h.tcp);
             }
 
-            fn set_proxy2server_headers(c: &mut Connection, h: &mut HeaderState, pd: &L234Data) {
+            fn set_proxy2server_headers(c: &mut Connection, h: &mut HeaderState, pd: &L234Data, ip_src: u32) {
                 if c.server.is_none() {
                     error!("no server set: {}", c);
                 }
@@ -325,7 +336,7 @@ pub fn setup_forwarder<F1, F2>(
                 h.mac.set_smac(&pd.mac);
                 let l2l3 = &c.server.as_ref().unwrap();
                 h.set_server_socket(l2l3.ip, l2l3.port);
-                h.ip.set_src(pd.ip);
+                h.ip.set_src(ip_src);
                 h.tcp.set_src_port(c.p_port());
             }
 
@@ -334,6 +345,7 @@ pub fn setup_forwarder<F1, F2>(
                 c: &mut Connection,
                 h: &mut HeaderState,
                 pd: &L234Data,
+                ip_src: u32,
                 f_process_payload: &Arc<F>,
             ) where
                 F: Fn(&mut Connection, &mut [u8], usize),
@@ -341,12 +353,17 @@ pub fn setup_forwarder<F1, F2>(
                 let tailroom = p.get_tailroom();
                 f_process_payload(c, p.get_mut_payload(), tailroom);
                 let ip_client = h.ip.src();
+                let old_ip_dst = h.ip.dst();
                 let port_client = h.tcp.src_port();
-                set_proxy2server_headers(c, h, pd);
+                set_proxy2server_headers(c, h, pd, ip_src);
                 h.tcp.update_checksum_incremental(port_client, c.p_port());
                 h.tcp.update_checksum_incremental(pd.port, c.server.as_ref().unwrap().port);
                 h.tcp.update_checksum_incremental(
                     !finalize_checksum(ip_client),
+                    !finalize_checksum(ip_src)
+                );
+                h.tcp.update_checksum_incremental(
+                    !finalize_checksum(old_ip_dst),
                     !finalize_checksum(c.server.as_ref().unwrap().ip)
                 );
                 // adapt ackn of client packet
@@ -375,6 +392,7 @@ pub fn setup_forwarder<F1, F2>(
                 h.mac.set_dmac(&c.client_mac.src);
                 h.mac.set_smac(&pd.mac);
                 let ip_server = h.ip.src();
+                let old_dest_ip = h.ip.dst();
                 h.ip.set_dst(u32::from(*c.get_client_sock().ip()));
                 h.ip.set_src(pd.ip);
                 let server_src_port = h.tcp.src_port();
@@ -384,6 +402,10 @@ pub fn setup_forwarder<F1, F2>(
                 h.tcp.update_checksum_incremental(c.p_port(), c.get_client_sock().port());
                 h.tcp.update_checksum_incremental(
                     !finalize_checksum(ip_server),
+                    !finalize_checksum(pd.ip)
+                );
+                h.tcp.update_checksum_incremental(
+                    !finalize_checksum(old_dest_ip),
                     !finalize_checksum(u32::from(*c.get_client_sock().ip()))
                 );
                 // adapt seqn and ackn from server packet
@@ -412,6 +434,7 @@ pub fn setup_forwarder<F1, F2>(
                 c: &mut Connection,
                 h: &mut HeaderState,
                 pd: &L234Data,
+                ip_src: u32,    // the address to use as source ip, may differ from pd.ip
                 f_select_server: &Arc<F>,
             ) where
                 F: Fn(&mut Connection),
@@ -439,7 +462,7 @@ pub fn setup_forwarder<F1, F2>(
                 let trim_by = min(p.data_len() - 60usize, payload_sz as usize);
                 p.trim_payload_size(trim_by);
                 c.f_seqn = h.tcp.seq_num().wrapping_sub(1);
-                set_proxy2server_headers(c, h, pd);
+                set_proxy2server_headers(c, h, pd, ip_src);
                 h.tcp.set_seq_num(c.f_seqn);
                 h.tcp.set_syn_flag();
                 h.tcp.set_ack_num(0u32);
@@ -555,6 +578,7 @@ pub fn setup_forwarder<F1, F2>(
                         if old_c_state == TcpState::Closed {
                             // replies with a SYN-ACK to client:
                             client_syn_received(p, &mut c, &mut hs);
+                            debug!("{} (SYN-)ACK to client, L3: { }, L4: { }", thread_id, hs.ip, hs.tcp);
                             group_index = 1;
                         } else {
                             warn!("received client SYN in state {:?}/{:?}", c.con_rec.c_state, c.con_rec.s_state);
@@ -576,7 +600,8 @@ pub fn setup_forwarder<F1, F2>(
                     } else if old_s_state == TcpState::LastAck && hs.tcp.ack_flag() || old_c_state == TcpState::FinWait2 {
                         // received final ack from client for client initiated close
                         debug!(
-                            "received final ACK for client initiated close on port {}/{}",
+                            "{} received final ACK for client initiated close on port {}/{}",
+                            thread_id,
                             hs.tcp.src_port(),
                             c.p_port(),
                         );
@@ -585,17 +610,18 @@ pub fn setup_forwarder<F1, F2>(
                         c.con_rec.released(ReleaseCause::FinClient);
                         // release connection in the next block after the state machine
                         release_connection = Some(c.p_port());
-                        debug!("releasing connection state for {}/{}", hs.tcp.src_port(), c.p_port());
+                        debug!("{} releasing connection state for {}/{}", thread_id, hs.tcp.src_port(), c.p_port());
                     } else if hs.tcp.fin_flag() {
                         if old_s_state >= TcpState::FinWait1 {
                             // we got a FIN as a receipt to a sent FIN (server closed connection)
-                            debug!("received FIN-reply from client {:?}", hs_flow.src_socket_addr());
+                            debug!("{} received FIN-reply from client {:?}", thread_id, hs_flow.src_socket_addr());
                             c.con_rec.c_state.push(TcpState::LastAck);
                             //c.con_rec.s_state.push(TcpState::Closed);
                         } else {
                             // client wants to close connection
                             debug!(
-                                "client sends FIN on port {}/{} in state {:?}/{:?}",
+                                "{} client sends FIN on port {}/{} in state {:?}/{:?}",
+                                thread_id,
                                 hs.tcp.src_port(),
                                 c.p_port(),
                                 c.con_rec.c_state,
@@ -622,7 +648,7 @@ pub fn setup_forwarder<F1, F2>(
                     } else if old_c_state == TcpState::Established
                         && old_s_state == TcpState::Listen {
                         // should be the first payload packet from client
-                        select_server(p, &mut c, &mut hs, &pd, &f_select_server);
+                        select_server(p, &mut c, &mut hs, &pd, ip_src, &f_select_server);
                         debug!("{} SYN packet to server - L3: {}, L4: {}", thread_id, hs.ip, p.get_header());
                         c.con_rec.s_state.push(TcpState::SynReceived);
                         group_index = 1;
@@ -642,7 +668,7 @@ pub fn setup_forwarder<F1, F2>(
                     if old_s_state >= TcpState::Established
                         && old_c_state >= TcpState::Established
                         && old_c_state < TcpState::Closed {
-                        client_to_server(p, &mut c, &mut hs, &pd, &f_process_payload_c_s);
+                        client_to_server(p, &mut c, &mut hs, &pd, ip_src, &f_process_payload_c_s);
                         group_index = 1;
                     }
                 }
@@ -672,7 +698,8 @@ pub fn setup_forwarder<F1, F2>(
                             } else {
                                 // server initiated TCP close
                                 debug!(
-                                    "server closes connection on port {}/{} in state {:?}",
+                                    "{} server closes connection on port {}/{} in state {:?}",
+                                    thread_id,
                                     hs.tcp.dst_port(),
                                     c.get_client_sock().port(),
                                     c.con_rec.s_state,

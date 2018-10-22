@@ -14,7 +14,7 @@ use e2d2::utils;
 use eui48::MacAddress;
 use {MessageFrom, PipelineId};
 use timer_wheel::{TimerWheel, MILLIS_TO_CYCLES};
-use {Configuration, Timeouts};
+use {Configuration, Timeouts, FlowSteeringMode};
 
 use fnv::FnvHasher;
 
@@ -251,15 +251,14 @@ pub struct ConnectionManager {
     port2con: Vec<Connection>,
     timeouts: Timeouts,
     pci: CacheAligned<PortQueue>, // the PortQueue for which connections are managed
-    //proxy_data: L234Data,
     pipeline_id: PipelineId,
     tx: Sender<MessageFrom>,
     tcp_port_base: u16,
+    ip: u32,    // ip address to use for connections of this manager
 }
 
 fn get_tcp_port_base_by_manager_count(pci: &CacheAligned<PortQueue>, count: u16) -> u16 {
     let port_mask = pci.port.get_tcp_dst_port_mask();
-    debug!("port_mask= {}", port_mask);
     port_mask - count * (!port_mask + 1)
 }
 
@@ -272,12 +271,20 @@ impl ConnectionManager {
         tx: Sender<MessageFrom>,
     ) -> ConnectionManager {
         let old_manager_count: u16 = GLOBAL_MANAGER_COUNT.fetch_add(1, Ordering::SeqCst) as u16;
+        let tcp_port_base;
+        let ip;
         let port_mask = pci.port.get_tcp_dst_port_mask();
-        let tcp_port_base: u16 = get_tcp_port_base_by_manager_count(&pci, old_manager_count);
-        let max_tcp_port: u16 = tcp_port_base + !port_mask;
+        if proxy_config.flow_steering_mode() == FlowSteeringMode::Port { // steering by port
+            tcp_port_base = get_tcp_port_base_by_manager_count(&pci, old_manager_count);
+            ip = proxy_data.ip;
+        } else {
+            tcp_port_base = get_tcp_port_base_by_manager_count(&pci, 0);
+            ip = proxy_data.ip + old_manager_count as u32; //steering by IP
+        };
+        let max_tcp_port = tcp_port_base + !port_mask;
         // program the NIC to send all flows for our owned ports to our rx queue
         pci.port
-            .add_fdir_filter(pci.rxq() as u16, proxy_data.ip, tcp_port_base)
+            .add_fdir_filter(pci.rxq() as u16, ip, tcp_port_base)
             .unwrap();
         let mut cm = ConnectionManager {
             sock2port: HashMap::<SocketAddrV4, u16, FnvHash>::with_hasher(Default::default()),
@@ -285,19 +292,20 @@ impl ConnectionManager {
             free_ports: (tcp_port_base..max_tcp_port).collect(),
             timeouts: Timeouts::default_or_some(&proxy_config.engine.timeouts),
             pci,
-            //proxy_data,
             pipeline_id,
             tx,
             tcp_port_base,
+            ip,
         };
         // need to add last port this way to avoid overflow with slice, when max_tcp_port == 65535
         cm.free_ports.push_back(max_tcp_port);
         //        cm.spawn_maintenance_thread();
         debug!(
-            "created ConnectionManager {} for port {}, rxq {} and tcp ports {} - {}",
+            "created ConnectionManager {} for port {}, rxq {}, ip= {}, tcp ports {} - {}",
             old_manager_count,
             PacketRx::port_id(&cm.pci),
             cm.pci.rxq(),
+            Ipv4Addr::from(ip),
             cm.free_ports.front().unwrap(),
             cm.free_ports.back().unwrap(),
         );
@@ -316,6 +324,11 @@ impl ConnectionManager {
     #[inline]
     pub fn tcp_port_base(&self) -> u16 {
         self.tcp_port_base
+    }
+
+    #[inline]
+    pub fn ip(&self) -> u32 {
+        self.ip
     }
     //fn tcp_port_mask(&self) -> u16 { self.tcp_port_mask }
 
@@ -432,7 +445,7 @@ impl ConnectionManager {
                         assert_eq!(cc.p_port(), 0);
                         cc.initialize(s, port);
                         now = cc.con_rec.c_syn_recv;
-                        debug!("tcp flow for {} created on port {:?}", s, port);
+                        debug!("tcp flow for {} created on {}:{:?}", s, Ipv4Addr::from(self.ip), port);
                     }
                     let port_vec = self.get_timeouts(&now, wheel);
                     if self.timeouts.established.unwrap() < wheel.get_max_timeout_cycles() {

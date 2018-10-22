@@ -58,6 +58,11 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::fmt;
 use std::cmp::Ordering;
 
+#[derive(Deserialize, Clone, Copy, PartialEq)]
+pub enum FlowSteeringMode {
+    Port,   // default
+    Ip,
+}
 
 #[derive(Deserialize)]
 struct Config {
@@ -71,14 +76,23 @@ pub struct Configuration {
     pub test_size: Option<usize>,
 }
 
+impl Configuration {
+    pub fn flow_steering_mode(&self) -> FlowSteeringMode {
+        self.engine.flow_steering.unwrap_or(FlowSteeringMode::Port)
+    }
+}
+
 #[derive(Deserialize, Clone)]
 pub struct EngineConfig {
+    pub flow_steering: Option<FlowSteeringMode>,
     pub namespace: String,
     pub mac: String,
     pub ipnet: String,
     pub timeouts: Option<Timeouts>,
     pub port: u16,
 }
+
+
 
 #[derive(Deserialize, Clone)]
 pub struct TargetConfig {
@@ -371,7 +385,6 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
             tasks.push(Vec::<(PipelineId, Uuid)>::with_capacity(16));
         }
         context.execute_schedulers();
-
         // set up kni
         debug!("Number of PMD ports: {}", PmdPort::num_pmd_ports());
         for port in context.ports.values() {
@@ -384,9 +397,8 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
             if port.is_kni() {
                 setup_kni(
                     port.linux_if().unwrap(),
-                    &configuration.engine.ipnet,
-                    &configuration.engine.mac,
-                    &configuration.engine.namespace,
+                    &configuration,
+                    if configuration.flow_steering_mode() == FlowSteeringMode::Ip { context.active_cores.len() } else { 1 },
                 );
             }
         }

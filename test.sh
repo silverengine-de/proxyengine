@@ -1,5 +1,5 @@
 #!/bin/bash
-sudo ip addr add 192.168.222.3/24 dev enp7s0f1
+sudo ip addr add 192.168.222.32/24 dev enp7s0f1
 
 set -e
 
@@ -10,11 +10,20 @@ else
 fi
 
 case $TASK in
-    test_tcp_proxy)
+    test_rfs_ip)
         export RUST_LOG="tcp_proxy=info,test_tcp_proxy=debug,e2d2=info"
         export RUST_BACKTRACE=1
         executable=`cargo test $2 --no-run --message-format=json --test test_tcp_proxy | jq -r 'select((.profile.test == true) and (.target.name == "test_tcp_proxy")) | .filenames[]'`
         echo $executable
+        echo ./tests/test_rfs_ip.toml > tests/toml_file.txt
+        sudo -E env "PATH=$PATH" $executable --nocapture
+        ;;
+    test_rfs_port)
+        export RUST_LOG="tcp_proxy=info,test_tcp_proxy=debug,e2d2=info"
+        export RUST_BACKTRACE=1
+        executable=`cargo test $2 --no-run --message-format=json --test test_tcp_proxy | jq -r 'select((.profile.test == true) and (.target.name == "test_tcp_proxy")) | .filenames[]'`
+        echo $executable
+        echo ./tests/test_rfs_ip.toml > tests/toml_file.txt
         sudo -E env "PATH=$PATH" $executable --nocapture
         ;;
     timeout)
@@ -31,13 +40,11 @@ case $TASK in
         sudo -E env "PATH=$PATH" $executable --nocapture
         ;;
     all)
-        ./test.sh test_tcp_proxy $2
+        ./test.sh test_rfs_ip $2
+        ./test.sh test_rfs_port $2
         ./test.sh timeout $2
         ./test.sh client_syn_fin $2
         ;;
-
-
-
 esac
 
 
