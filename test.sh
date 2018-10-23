@@ -1,5 +1,4 @@
 #!/bin/bash
-sudo ip addr add 192.168.222.32/24 dev enp7s0f1
 
 set -e
 
@@ -23,7 +22,7 @@ case $TASK in
         export RUST_BACKTRACE=1
         executable=`cargo test $2 --no-run --message-format=json --test test_tcp_proxy | jq -r 'select((.profile.test == true) and (.target.name == "test_tcp_proxy")) | .filenames[]'`
         echo $executable
-        echo ./tests/test_rfs_ip.toml > tests/toml_file.txt
+        echo ./tests/test_rfs_port.toml > tests/toml_file.txt
         sudo -E env "PATH=$PATH" $executable --nocapture
         ;;
     timeout)

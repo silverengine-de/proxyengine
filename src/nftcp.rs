@@ -241,7 +241,12 @@ pub fn setup_forwarder<F1, F2>(
                     0
                 }
             } else {
-                debug!("{} sending to KNI: {}", thread_id_1, p.get_header());
+                debug!("{} sending to KNI: {}, dest-ip= {}, ip assigned to core = {}",
+                    thread_id_1, 
+                    p.get_header(), 
+                    Ipv4Addr::from(ipflow.dst_ip), 
+                    Ipv4Addr::from(ip_src),
+                );
                 0
             }
         },
