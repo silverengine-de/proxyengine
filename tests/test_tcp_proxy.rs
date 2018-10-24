@@ -18,7 +18,6 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc::channel;
 use std::collections::{HashSet};
 use std::fs::File;
-use std::io::prelude::*;
 
 use ipnet::Ipv4Net;
 

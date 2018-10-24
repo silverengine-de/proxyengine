@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
 use std::thread;
 use std::time::Duration;
-use tcp_proxy::{get_mac_from_ifname, print_hard_statistics, read_config, setup_pipelines};
+use tcp_proxy::{get_mac_from_ifname, read_config, setup_pipelines};
 use tcp_proxy::Connection;
 use tcp_proxy::Container;
 use tcp_proxy::errors::*;

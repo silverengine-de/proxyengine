@@ -1,5 +1,5 @@
 #!/bin/bash
-bricksDir=~/gitclones/NetBricks
+bricksDir=~/work/NetBricks
 sudo ip link set enp7s0f0 down
 sudo modprobe vfio_pci
 sudo insmod $bricksDir/3rdparty/dpdk/build/kmod/rte_kni.ko "kthread_mode=multiple"
