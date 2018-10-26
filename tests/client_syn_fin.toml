@@ -1,5 +1,4 @@
 
-
 [netbricks]
 name        = "client_syn_fin"
 master_core = 0
