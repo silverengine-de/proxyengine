@@ -23,15 +23,15 @@ Note, that a local installation of NetBricks is necessary as it includes DPDK an
 
 ProxyEngine includes a main program bin.rs (using example configurations _\*.toml_) and test modules (using configurations _tests/\*.toml_). For both the network interfaces of the test machine need to be prepared (see [prepNet.sh](https://github.com/silverengine-de/proxyengine/blob/master/prepNet.sh)). 
 
-First a network interface for user-space DPDK is needed. This interface is used by the proxy to connect to clients and servers (in the example configuration this interface uses PCI slot 07:00.0). The latest code is tested with NIC X520-DA2 (82599) and previous single rx/tx versions with e1000e and vmxnet3. Please note that X710 based NICs can only be used for ProxyEngine with IP address based RFS, because X710 does not allow for partial masking of TCP ports.
+First a network interface for user-space DPDK is needed. This interface is used by the proxy to connect to clients and servers (in the example configuration this interface uses PCI slot 07:00.0). The current code is tested on physical servers with NIC X520-DA2 (82599) and recently also with NIC X710-DA2. Please note that X710 based NICs require that ProxyEngine is configured for IP address based RFS, because X710 does not allow for partial masking of TCP ports as it is possible with 82599 based NICs.
 
-Secondly an extra Linux interface is required which is used by the test modules for placing client and server stacks.
+Secondly an extra Linux interface is required which is used by the test modules for placing client and server stacks. When one of the above two-port NICs are used, the second port of the NIC can be assigned to the Linux OS.
 
-Both interfaces must be interconnected. In case of virtual interfaces, e.g. interfaces may be connected to a host-only network of the hypervisor. In case of physical interfaces, interfaces may be interconnected by a cross over cable. Using Wireshark on the Linux interface allows us to observe the complete traffic exchange between clients, the proxy and the servers.
+For running the tests both interfaces must be interconnected with a cross over cable. Using Wireshark on the Linux interface allows us to observe the complete traffic exchange between clients, the proxy and the servers.
 
-In addition some parameters like the Linux interface name (linux_if) and the IP / MAC addresses in the test module configuration files  tests/*.toml need to be adapted. 
+In addition some parameters like the Linux interface name (linux_if), the PCI slot id and the IP / MAC addresses in the test module configuration files  tests/*.toml need to be adapted. 
 
-Latest code of ProxyEngine is tested on a 2-socket NUMA server, each socket hosting 4 physical cores, running Centos 7.4. The benchmarking mentioned above was done with two servers, one running iperf3 client and server instances, the other running the ProxyEngine as the device under test (DUT). More benchmarking to follow.
+Latest code of ProxyEngine was tested on two different 2-socket NUMA servers, each socket hosting 4, respectively 6 physical cores, running Centos 7.4. The benchmarking mentioned above was done with this two servers, one running iperf3 client and server instances, the other running the ProxyEngine as the device under test (DUT). More benchmarking to follow.
 
 
 _**ProxyEngine Test Configuration**_
