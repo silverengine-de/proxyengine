@@ -36,7 +36,7 @@ use e2d2::native::zcsi::*;
 use e2d2::common::ErrorKind as E2d2ErrorKind;
 use e2d2::scheduler::*;
 use e2d2::allocators::CacheAligned;
-use e2d2::interface::{PortQueue, PmdPort};
+use e2d2::interface::{PortQueue, PmdPort, PortType, FlowDirector};
 
 use errors::*;
 use nftcp::*;
@@ -57,10 +57,12 @@ use std::time::Duration;
 use std::sync::mpsc::RecvTimeoutError;
 use std::fmt;
 use std::cmp::Ordering;
+use std::str::FromStr;
 
 #[derive(Deserialize, Clone, Copy, PartialEq)]
 pub enum FlowSteeringMode {
-    Port,   // default
+    Port,
+    // default
     Ip,
 }
 
@@ -91,7 +93,6 @@ pub struct EngineConfig {
     pub timeouts: Option<Timeouts>,
     pub port: u16,
 }
-
 
 
 #[derive(Deserialize, Clone)]
@@ -269,6 +270,7 @@ pub fn setup_pipelines<F1, F2>(
     proxy_config: &Configuration,
     f_select_server: Arc<F1>,
     f_process_payload_c_s: Arc<F2>,
+    flowdirector_map: HashMap<i32, Arc<FlowDirector>>,
     tx: Sender<MessageFrom>,
 ) where
     F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
@@ -326,6 +328,7 @@ pub fn setup_pipelines<F1, F2>(
         proxy_config,
         f_select_server,
         f_process_payload_c_s,
+        flowdirector_map,
         tx,
     );
 }
@@ -371,6 +374,65 @@ pub enum MessageTo {
     Exit, // exit recv thread
 }
 
+
+fn get_tcp_port_base(port: &PmdPort , count: u16) -> u16 {
+    let port_mask = port.get_tcp_dst_port_mask();
+    port_mask - count * (!port_mask + 1)
+}
+
+
+pub fn initialize_flowdirector(context:&NetBricksContext, configuration: &Configuration) -> HashMap<i32, Arc<FlowDirector>> {
+    let mut fdir_map: HashMap<i32, Arc<FlowDirector>>= HashMap::new();
+    for port in  context.ports.values() {
+        if *port.port_type() == PortType::Dpdk {
+            // initialize flow director on port, cannot do this in parallel from multiple threads
+            let mut flowdir= FlowDirector::new(port.clone());
+            let ip_address = &configuration.engine.ipnet;
+            let ip_addr_first = Ipv4Net::from_str(ip_address).unwrap().addr();
+            for (i, core) in context.active_cores.iter().enumerate() {
+                match context.rx_queues.get(&core) {    // retrieve all rx queues for this core
+                    Some(set) => match set.iter().last() {  // select one (should be the only one)
+                        Some(queue) => {
+                            match configuration.flow_steering_mode() {
+                                FlowSteeringMode::Ip => {
+                                    debug!("set fdir filter on port {} for rfs mode IP: queue= {}, ip= {}, port base = {}",
+                                           port.port_id(),
+                                           queue.rxq(),
+                                           Ipv4Addr::from(u32::from(ip_addr_first) + i as u32),
+                                           port.get_tcp_dst_port_mask(),
+                                    );
+                                    flowdir.add_fdir_filter(
+                                        queue.rxq(),
+                                        u32::from(ip_addr_first) + i as u32,
+                                        port.get_tcp_dst_port_mask(),
+                                    ).unwrap();
+                                }
+                                FlowSteeringMode::Port => {
+                                    debug!("set fdir filter on port {} for rfs mode Port: queue= {}, ip= {}, port base = {}",
+                                           port.port_id(),
+                                           queue.rxq(),
+                                           Ipv4Addr::from(u32::from(ip_addr_first)),
+                                           get_tcp_port_base(port, i as u16),
+                                    );
+                                    flowdir.add_fdir_filter(
+                                        queue.rxq(),
+                                        u32::from(ip_addr_first),
+                                        get_tcp_port_base(port, i as u16),
+                                    ).unwrap();
+                                }
+                            }
+                        }
+                        None => (),
+                    }
+                    None => (),
+                }
+            }
+            fdir_map.insert(port.port_id(), Arc::new(flowdir));
+        }
+    }
+    fdir_map
+}
+
 pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksContext, configuration: Configuration) {
     /*
         mrx: receiver for messages from all the pipelines running
@@ -387,7 +449,7 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
         context.execute_schedulers();
         // set up kni
         debug!("Number of PMD ports: {}", PmdPort::num_pmd_ports());
-        for port in context.ports.values() {
+        for port in  context.ports.values() {
             debug!(
                 "port {}:{} -- mac_address= {}",
                 port.port_type(),
@@ -465,13 +527,13 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                     }
                     println!("Connection Records ...");
                     let cmp = |a: &(PipelineId, ConRecord), b: &(PipelineId, ConRecord)| {
-                        let ordering= a.1.client_sock.ip().cmp(b.1.client_sock.ip());
-                        if ordering==Ordering::Equal {
+                        let ordering = a.1.client_sock.ip().cmp(b.1.client_sock.ip());
+                        if ordering == Ordering::Equal {
                             a.1.client_sock.port().cmp(&b.1.client_sock.port())
                         } else { ordering }
                     };
                     con_records.sort_by(cmp);
-                    for (p,con_record) in &con_records {
+                    for (p, con_record) in &con_records {
                         info!(
                             "CRecord: pipe {}, c-sock={}, p_port= {}, hold = {:12} cy, c/s-setup = {:8} cy/{:8} cy, {}, c/s_state = {:?}/{:?}, rc = {:?}",
                             p,
@@ -545,24 +607,24 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                 .as_ref()
                 .unwrap()
                 .recv_timeout(Duration::from_millis(10))
-            {
-                Ok(SchedulerReply::PerformanceData(core, map)) => {
-                    for d in map {
-                        info!(
-                            "{:2}: {:20} {:>15} count= {:12}",
-                            core,
-                            (d.1).0,
-                            (d.1).1.separated_string(),
-                            (d.1).2.separated_string(),
-                        )
+                {
+                    Ok(SchedulerReply::PerformanceData(core, map)) => {
+                        for d in map {
+                            info!(
+                                "{:2}: {:20} {:>15} count= {:12}",
+                                core,
+                                (d.1).0,
+                                (d.1).1.separated_string(),
+                                (d.1).2.separated_string(),
+                            )
+                        }
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(e) => {
+                        error!("error receiving from SchedulerReply channel: {}", e);
+                        break;
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(e) => {
-                    error!("error receiving from SchedulerReply channel: {}", e);
-                    break;
-                }
-            }
         }
         info!("exiting recv thread ...");
     });

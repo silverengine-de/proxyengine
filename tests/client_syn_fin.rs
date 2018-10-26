@@ -27,7 +27,7 @@ use e2d2::scheduler::StandaloneScheduler;
 use e2d2::allocators::CacheAligned;
 
 use tcp_proxy::Connection;
-use tcp_proxy::read_config;
+use tcp_proxy::{read_config, initialize_flowdirector};
 use tcp_proxy::get_mac_from_ifname;
 use tcp_proxy::Container;
 use tcp_proxy::L234Data;
@@ -132,8 +132,8 @@ fn delayed_binding_proxy() {
 
     match initialize_system(&mut configuration) {
         Ok(mut context) => {
+            let flowdirector_map=initialize_flowdirector(&context, &proxy_config);
             context.start_schedulers();
-
             let (mtx, mrx) = channel::<MessageFrom>();
             let (reply_mtx, reply_mrx) = channel::<MessageTo>();
 
@@ -152,6 +152,7 @@ fn delayed_binding_proxy() {
                         &proxy_config_cloned,
                         boxed_fss.clone(),
                         boxed_fpp.clone(),
+                        flowdirector_map.clone(),
                         mtx_clone.clone(),
                     );
                 },

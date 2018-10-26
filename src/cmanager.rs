@@ -8,7 +8,7 @@ use std::fmt;
 
 use e2d2::headers::MacHeader;
 use e2d2::allocators::CacheAligned;
-use e2d2::interface::{PacketRx, PortQueue};
+use e2d2::interface::{PacketRx, PortQueue, L4Flow};
 use e2d2::utils;
 
 use eui48::MacAddress;
@@ -257,10 +257,6 @@ pub struct ConnectionManager {
     ip: u32,    // ip address to use for connections of this manager
 }
 
-fn get_tcp_port_base_by_manager_count(pci: &CacheAligned<PortQueue>, count: u16) -> u16 {
-    let port_mask = pci.port.get_tcp_dst_port_mask();
-    port_mask - count * (!port_mask + 1)
-}
 
 impl ConnectionManager {
     pub fn new(
@@ -268,24 +264,13 @@ impl ConnectionManager {
         pci: CacheAligned<PortQueue>,
         proxy_data: L234Data,
         proxy_config: Configuration,
+        l4flow: &L4Flow,
         tx: Sender<MessageFrom>,
     ) -> ConnectionManager {
         let old_manager_count: u16 = GLOBAL_MANAGER_COUNT.fetch_add(1, Ordering::SeqCst) as u16;
-        let tcp_port_base;
-        let ip;
+        let (ip, tcp_port_base)=(l4flow.ip, l4flow.port);
         let port_mask = pci.port.get_tcp_dst_port_mask();
-        if proxy_config.flow_steering_mode() == FlowSteeringMode::Port { // steering by port
-            tcp_port_base = get_tcp_port_base_by_manager_count(&pci, old_manager_count);
-            ip = proxy_data.ip;
-        } else {
-            tcp_port_base = get_tcp_port_base_by_manager_count(&pci, 0);
-            ip = proxy_data.ip + old_manager_count as u32; //steering by IP
-        };
         let max_tcp_port = tcp_port_base + !port_mask;
-        // program the NIC to send all flows for our owned ports to our rx queue
-        pci.port
-            .add_fdir_filter(pci.rxq() as u16, ip, tcp_port_base)
-            .unwrap();
         let mut cm = ConnectionManager {
             sock2port: HashMap::<SocketAddrV4, u16, FnvHash>::with_hasher(Default::default()),
             port2con: vec![Connection::new(); (!port_mask + 1) as usize],

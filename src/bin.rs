@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
 use std::thread;
 use std::time::Duration;
-use tcp_proxy::{get_mac_from_ifname, read_config, setup_pipelines};
+use tcp_proxy::{get_mac_from_ifname, read_config, setup_pipelines, initialize_flowdirector};
 use tcp_proxy::Connection;
 use tcp_proxy::Container;
 use tcp_proxy::errors::*;
@@ -161,6 +161,7 @@ pub fn main() {
         .and_then(|ctxt| check_system(ctxt))
     {
         Ok(mut context) => {
+            let flowdirector_map=initialize_flowdirector(&context, &proxy_config);
             unsafe { fdir_get_infos(1u16); }
             context.start_schedulers();
 
@@ -181,6 +182,7 @@ pub fn main() {
                         &proxy_config_cloned,
                         boxed_fss.clone(),
                         boxed_fpp.clone(),
+                        flowdirector_map.clone(),
                         mtx_clone.clone(),
                     );
                 },

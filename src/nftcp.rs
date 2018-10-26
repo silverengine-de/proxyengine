@@ -14,6 +14,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::process::Command;
 use std::sync::mpsc::Sender;
 use std::str::FromStr;
+use std::collections::HashMap;
 
 use eui48::MacAddress;
 use ipnet::Ipv4Net;
@@ -142,6 +143,7 @@ pub fn setup_forwarder<F1, F2>(
     proxy_config: &Configuration,
     f_select_server: Arc<F1>,
     f_process_payload_c_s: Arc<F2>,
+    flowdirector_map: HashMap<i32, Arc<FlowDirector>>,
     tx: Sender<MessageFrom>,
 ) where
     F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
@@ -167,6 +169,7 @@ pub fn setup_forwarder<F1, F2>(
         pci.clone(),
         pd.clone(),
         proxy_config.clone(),
+        flowdirector_map.get(&pci.port.port_id()).unwrap().get_flow(pci.rxq()),
         tx.clone()
     );
 
