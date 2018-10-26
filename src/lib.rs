@@ -395,29 +395,33 @@ pub fn initialize_flowdirector(context:&NetBricksContext, configuration: &Config
                         Some(queue) => {
                             match configuration.flow_steering_mode() {
                                 FlowSteeringMode::Ip => {
+                                    let dst_ip= u32::from(ip_addr_first) + i as u32 +1;
+                                    let dst_port = port.get_tcp_dst_port_mask();
                                     debug!("set fdir filter on port {} for rfs mode IP: queue= {}, ip= {}, port base = {}",
                                            port.port_id(),
                                            queue.rxq(),
-                                           Ipv4Addr::from(u32::from(ip_addr_first) + i as u32),
-                                           port.get_tcp_dst_port_mask(),
+                                           Ipv4Addr::from(dst_ip),
+                                           dst_port,
                                     );
                                     flowdir.add_fdir_filter(
                                         queue.rxq(),
-                                        u32::from(ip_addr_first) + i as u32,
-                                        port.get_tcp_dst_port_mask(),
+                                        dst_ip,
+                                        dst_port,
                                     ).unwrap();
                                 }
                                 FlowSteeringMode::Port => {
+                                    let dst_ip= u32::from(ip_addr_first);
+                                    let dst_port= get_tcp_port_base(port, i as u16);
                                     debug!("set fdir filter on port {} for rfs mode Port: queue= {}, ip= {}, port base = {}",
                                            port.port_id(),
                                            queue.rxq(),
-                                           Ipv4Addr::from(u32::from(ip_addr_first)),
-                                           get_tcp_port_base(port, i as u16),
+                                           Ipv4Addr::from(dst_ip),
+                                           dst_port,
                                     );
                                     flowdir.add_fdir_filter(
                                         queue.rxq(),
-                                        u32::from(ip_addr_first),
-                                        get_tcp_port_base(port, i as u16),
+                                        dst_ip,
+                                        dst_port,
                                     ).unwrap();
                                 }
                             }
@@ -460,7 +464,7 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                 setup_kni(
                     port.linux_if().unwrap(),
                     &configuration,
-                    if configuration.flow_steering_mode() == FlowSteeringMode::Ip { context.active_cores.len() } else { 1 },
+                    if configuration.flow_steering_mode() == FlowSteeringMode::Ip { context.active_cores.len() +1 } else { 1 },
                 );
             }
         }
