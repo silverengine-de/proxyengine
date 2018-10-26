@@ -30,12 +30,14 @@ case $TASK in
         export RUST_LOG="tcp_proxy=info,timeout=info,e2d2=info"
         executable=`cargo test $2 --no-run --message-format=json --test timeout | jq -r 'select((.profile.test == true) and (.target.name == "timeout")) | .filenames[]'`
         echo $executable
+        echo ./tests/timeout.toml > tests/toml_file.txt
         sudo -E env "PATH=$PATH" $executable --nocapture
         ;;
     client_syn_fin)
         export RUST_LOG="tcp_proxy=info,client_syn_fin=info,e2d2=info"
         executable=`cargo test $2 --no-run --message-format=json --test client_syn_fin | jq -r 'select((.profile.test == true) and (.target.name == "client_syn_fin")) | .filenames[]'`
         echo $executable
+        echo ./tests/client_syn_fin.toml > tests/toml_file.txt
         sudo -E env "PATH=$PATH" $executable --nocapture
         ;;
     all)

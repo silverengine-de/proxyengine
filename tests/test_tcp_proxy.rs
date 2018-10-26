@@ -63,7 +63,6 @@ fn delayed_binding_proxy() {
     }
 
     let proxy_config = read_config(toml_file.trim()).expect("cannot read config from toml file");
-
     if proxy_config.test_size.is_none() {
         error!("missing parameter 'test_size' in configuration file");
         std::process::exit(1);
@@ -161,7 +160,6 @@ fn delayed_binding_proxy() {
         Ok(mut context) => {
             let flowdirector_map=initialize_flowdirector(&context, &proxy_config);
             context.start_schedulers();
-
             let (mtx, mrx) = channel::<MessageFrom>();
             let (reply_mtx, reply_mrx) = channel::<MessageTo>();
 

@@ -17,6 +17,7 @@ use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::mpsc::channel;
 use std::collections::{ HashSet};
+use std::fs::File;
 
 use ipnet::Ipv4Net;
 
@@ -40,7 +41,11 @@ use tcp_proxy::ReleaseCause;
 fn delayed_binding_proxy() {
     env_logger::init();
     info!("Testing timer_wheel of ProxyEngine ..");
-    let toml_file = "tests/timeout.toml";
+    // cannot directly read toml file from command line, as cargo test owns it. Thus we take a detour and read it from a file.
+    let mut f = File::open("./tests/toml_file.txt").expect("file not found");
+    let mut toml_file = String::new();
+    f.read_to_string(&mut toml_file)
+        .expect("something went wrong reading toml_file.txt");
 
     let log_level_rte = if log_enabled!(log::Level::Debug) {
         RteLogLevel::RteLogDebug
@@ -54,7 +59,7 @@ fn delayed_binding_proxy() {
         info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
     }
 
-    let proxy_config = read_config(toml_file).unwrap();
+    let proxy_config = read_config(toml_file.trim()).unwrap();
 
     if proxy_config.test_size.is_none() {
         error!("missing parameter 'test_size' in configuration file");
@@ -82,7 +87,7 @@ fn delayed_binding_proxy() {
 
     let opts = basic_opts();
 
-    let args: Vec<String> = vec!["proxyengine", "-f", toml_file]
+    let args: Vec<String> = vec!["proxyengine", "-f", toml_file.trim()]
         .iter()
         .map(|x| x.to_string())
         .collect::<Vec<String>>();
