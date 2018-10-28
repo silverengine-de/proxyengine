@@ -1,7 +1,6 @@
 use e2d2::operators::*;
 use e2d2::scheduler::*;
 use e2d2::allocators::CacheAligned;
-use e2d2::native::zcsi::rte_kni_handle_request;
 use e2d2::headers::{IpHeader, MacHeader, TcpHeader};
 use e2d2::interface::*;
 use e2d2::utils::{finalize_checksum, ipv4_extract_flow};
@@ -11,9 +10,7 @@ use e2d2::headers::EndOffset;
 use std::sync::Arc;
 use std::cmp::min;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::process::Command;
 use std::sync::mpsc::Sender;
-use std::str::FromStr;
 use std::collections::HashMap;
 
 use eui48::MacAddress;
@@ -25,115 +22,10 @@ use timer_wheel::TimerWheel;
 use Configuration;
 use { PipelineId, MessageFrom, TaskType };
 use timer_wheel::MILLIS_TO_CYCLES;
+use is_kni_core;
 
 const MIN_FRAME_SIZE: usize = 60; // without fcs
 
-pub struct KniHandleRequest {
-    pub kni_port: Arc<PmdPort>,
-}
-
-impl Executable for KniHandleRequest {
-    fn execute(&mut self) -> u32 {
-        unsafe {
-            rte_kni_handle_request(self.kni_port.get_kni());
-        }
-        1
-    }
-}
-
-pub fn is_kni_core(pci: &CacheAligned<PortQueue>) -> bool {
-    pci.rxq() == 0
-}
-
-pub fn setup_kni(kni_name: &str, configuration: &Configuration, ip_address_count: usize) {
-    let ip_address=&configuration.engine.ipnet;
-    let ip_addr_first= Ipv4Net::from_str(ip_address).unwrap().addr();
-    let prefix_len= Ipv4Net::from_str(ip_address).unwrap().prefix_len();
-    let mac_address = &configuration.engine.mac;
-    let kni_netns= &configuration.engine.namespace;
-
-
-    debug!("setup_kni");
-    //# ip link set dev vEth1 address XX:XX:XX:XX:XX:XX
-    let output = Command::new("ip")
-        .args(&["link", "set", "dev", kni_name, "address", mac_address])
-        .output()
-        .expect("failed to assign MAC address to kni i/f");
-    let reply = output.stderr;
-
-    debug!(
-        "assigning MAC addr {} to {}: {}, {}",
-        mac_address,
-        kni_name,
-        output.status,
-        String::from_utf8_lossy(&reply)
-    );
-
-    //# ip netns add nskni
-    let output = Command::new("ip")
-        .args(&["netns", "add", kni_netns])
-        .output()
-        .expect("failed to create namespace for kni i/f");
-    let reply = output.stderr;
-
-    debug!(
-        "creating network namespace {}: {}, {}",
-        kni_netns,
-        output.status,
-        String::from_utf8_lossy(&reply)
-    );
-
-    // ip link set dev vEth1 netns nskni
-    let output = Command::new("ip")
-        .args(&["link", "set", "dev", kni_name, "netns", kni_netns])
-        .output()
-        .expect("failed to move kni i/f to namespace");
-    let reply = output.stderr;
-
-    debug!(
-        "moving kni i/f {} to namesapce {}: {}, {}",
-        kni_name,
-        kni_netns,
-        output.status,
-        String::from_utf8_lossy(&reply)
-    );
-    for i in 0..ip_address_count {
-        // e.g. ip netns exec nskni ip addr add w.x.y.z/24 dev vEth1
-        let ip_net = Ipv4Net::new(Ipv4Addr::from(u32::from(ip_addr_first) + i as u32), prefix_len).unwrap().to_string();
-        let output = Command::new("ip")
-            .args(&["netns", "exec", kni_netns, "ip", "addr", "add", &ip_net, "dev", kni_name])
-            .output()
-            .expect("failed to assign IP address to kni i/f");
-        let reply = output.stderr;
-        debug!(
-            "assigning IP addr {} to {}: {}, {}",
-            ip_net,
-            kni_name,
-            output.status,
-            String::from_utf8_lossy(&reply)
-        );
-    }
-    // e.g. ip netns exec nskni ip link set dev vEth1 up
-    let output1 = Command::new("ip")
-        .args(&["netns", "exec", kni_netns, "ip", "link", "set", "dev", kni_name, "up"])
-        .output()
-        .expect("failed to set kni i/f up");
-    let reply1 = output1.stderr;
-    debug!(
-        "ip netns exec {} ip link set dev {} up: {}, {}",
-        kni_netns,
-        kni_name,
-        output1.status,
-        String::from_utf8_lossy(&reply1)
-    );
-    // e.g. ip netns exec nskni ip addr show dev vEth1
-    let output2 = Command::new("ip")
-        .args(&["netns", "exec", kni_netns, "ip", "addr", "show", "dev", kni_name])
-        .output()
-        .expect("failed to show IP address of kni i/f");
-    let reply2 = output2.stdout;
-    info!("show IP addr: {}\n {}", output.status, String::from_utf8_lossy(&reply2));
-}
 
 pub fn setup_forwarder<F1, F2>(
     core: i32,
@@ -167,7 +59,6 @@ pub fn setup_forwarder<F1, F2>(
     let mut sm: ConnectionManager = ConnectionManager::new(
         pipeline_id.clone(),
         pci.clone(),
-        pd.clone(),
         proxy_config.clone(),
         flowdirector_map.get(&pci.port.port_id()).unwrap().get_flow(pci.rxq()),
         tx.clone()

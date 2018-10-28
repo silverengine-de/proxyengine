@@ -14,7 +14,7 @@ use e2d2::utils;
 use eui48::MacAddress;
 use {MessageFrom, PipelineId};
 use timer_wheel::{TimerWheel, MILLIS_TO_CYCLES};
-use {Configuration, Timeouts, FlowSteeringMode};
+use {Configuration, Timeouts};
 
 use fnv::FnvHasher;
 
@@ -262,7 +262,6 @@ impl ConnectionManager {
     pub fn new(
         pipeline_id: PipelineId,
         pci: CacheAligned<PortQueue>,
-        proxy_data: L234Data,
         proxy_config: Configuration,
         l4flow: &L4Flow,
         tx: Sender<MessageFrom>,

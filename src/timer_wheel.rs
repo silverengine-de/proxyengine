@@ -4,7 +4,7 @@ use std::cmp::min;
 use std::fmt::Debug;
 use e2d2::utils;
 
-pub const MILLIS_TO_CYCLES:u64 = 2000000u64;
+pub const MILLIS_TO_CYCLES:u64 = 2270000u64;
 
 pub struct TimerWheel<T>
 where

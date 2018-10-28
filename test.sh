@@ -1,6 +1,7 @@
 #!/bin/bash
-
 set -e
+#we flush the ARP cache because outdated ARP entries may let tests fail
+sudo ip -s -s neigh flush all
 
 if [ $# -ge 1 ]; then
     TASK=$1
@@ -43,8 +44,9 @@ case $TASK in
     all)
         ./test.sh test_rfs_ip $2
         ./test.sh test_rfs_port $2
-        ./test.sh timeout $2
         ./test.sh client_syn_fin $2
+        #run timeout as last test, as it does not close all sockets, otherwise we need to wait until Linux times all sockets out
+        ./test.sh timeout $2
         ;;
 esac
 

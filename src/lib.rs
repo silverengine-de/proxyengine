@@ -39,8 +39,9 @@ use e2d2::allocators::CacheAligned;
 use e2d2::interface::{PortQueue, PmdPort, PortType, FlowDirector};
 
 use errors::*;
-use nftcp::*;
+use nftcp::setup_forwarder;
 
+use std::process::Command;
 use std::fs::File;
 use std::io::Read;
 use std::any::Any;
@@ -435,6 +436,113 @@ pub fn initialize_flowdirector(context:&NetBricksContext, configuration: &Config
         }
     }
     fdir_map
+}
+
+pub struct KniHandleRequest {
+    pub kni_port: Arc<PmdPort>,
+}
+
+impl Executable for KniHandleRequest {
+    fn execute(&mut self) -> u32 {
+        unsafe {
+            rte_kni_handle_request(self.kni_port.get_kni());
+        }
+        1
+    }
+}
+
+pub fn is_kni_core(pci: &CacheAligned<PortQueue>) -> bool {
+    pci.rxq() == 0
+}
+
+pub fn setup_kni(kni_name: &str, configuration: &Configuration, ip_address_count: usize) {
+    let ip_address=&configuration.engine.ipnet;
+    let ip_addr_first= Ipv4Net::from_str(ip_address).unwrap().addr();
+    let prefix_len= Ipv4Net::from_str(ip_address).unwrap().prefix_len();
+    let mac_address = &configuration.engine.mac;
+    let kni_netns= &configuration.engine.namespace;
+
+
+    debug!("setup_kni");
+    //# ip link set dev vEth1 address XX:XX:XX:XX:XX:XX
+    let output = Command::new("ip")
+        .args(&["link", "set", "dev", kni_name, "address", mac_address])
+        .output()
+        .expect("failed to assign MAC address to kni i/f");
+    let reply = output.stderr;
+
+    debug!(
+        "assigning MAC addr {} to {}: {}, {}",
+        mac_address,
+        kni_name,
+        output.status,
+        String::from_utf8_lossy(&reply)
+    );
+
+    //# ip netns add nskni
+    let output = Command::new("ip")
+        .args(&["netns", "add", kni_netns])
+        .output()
+        .expect("failed to create namespace for kni i/f");
+    let reply = output.stderr;
+
+    debug!(
+        "creating network namespace {}: {}, {}",
+        kni_netns,
+        output.status,
+        String::from_utf8_lossy(&reply)
+    );
+
+    // ip link set dev vEth1 netns nskni
+    let output = Command::new("ip")
+        .args(&["link", "set", "dev", kni_name, "netns", kni_netns])
+        .output()
+        .expect("failed to move kni i/f to namespace");
+    let reply = output.stderr;
+
+    debug!(
+        "moving kni i/f {} to namesapce {}: {}, {}",
+        kni_name,
+        kni_netns,
+        output.status,
+        String::from_utf8_lossy(&reply)
+    );
+    for i in 0..ip_address_count {
+        // e.g. ip netns exec nskni ip addr add w.x.y.z/24 dev vEth1
+        let ip_net = Ipv4Net::new(Ipv4Addr::from(u32::from(ip_addr_first) + i as u32), prefix_len).unwrap().to_string();
+        let output = Command::new("ip")
+            .args(&["netns", "exec", kni_netns, "ip", "addr", "add", &ip_net, "dev", kni_name])
+            .output()
+            .expect("failed to assign IP address to kni i/f");
+        let reply = output.stderr;
+        debug!(
+            "assigning IP addr {} to {}: {}, {}",
+            ip_net,
+            kni_name,
+            output.status,
+            String::from_utf8_lossy(&reply)
+        );
+    }
+    // e.g. ip netns exec nskni ip link set dev vEth1 up
+    let output1 = Command::new("ip")
+        .args(&["netns", "exec", kni_netns, "ip", "link", "set", "dev", kni_name, "up"])
+        .output()
+        .expect("failed to set kni i/f up");
+    let reply1 = output1.stderr;
+    debug!(
+        "ip netns exec {} ip link set dev {} up: {}, {}",
+        kni_netns,
+        kni_name,
+        output1.status,
+        String::from_utf8_lossy(&reply1)
+    );
+    // e.g. ip netns exec nskni ip addr show dev vEth1
+    let output2 = Command::new("ip")
+        .args(&["netns", "exec", kni_netns, "ip", "addr", "show", "dev", kni_name])
+        .output()
+        .expect("failed to show IP address of kni i/f");
+    let reply2 = output2.stdout;
+    info!("show IP addr: {}\n {}", output.status, String::from_utf8_lossy(&reply2));
 }
 
 pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksContext, configuration: Configuration) {

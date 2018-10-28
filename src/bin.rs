@@ -52,7 +52,7 @@ pub fn main() {
         std::process::exit(1);
     }
 
-    let proxy_config = read_config(&config_file).unwrap();
+    let configuration = read_config(&config_file).unwrap();
 
     fn am_root() -> bool {
         match env::var("USER") {
@@ -86,11 +86,11 @@ pub fn main() {
         Ok(m) => m,
         Err(f) => panic!(f.to_string()),
     };
-    let mut configuration = read_matches(&matches, &opts);
+    let mut netbricks_configuration = read_matches(&matches, &opts);
 
     //  let (tx, rx) = channel::<TcpEvent>();
 
-    let l234data: Vec<L234Data> = proxy_config
+    let l234data: Vec<L234Data> = configuration
         .targets
         .iter()
         .enumerate()
@@ -156,18 +156,18 @@ pub fn main() {
         Ok(context)
     }
 
-    match initialize_system(&mut configuration)
+    match initialize_system(&mut netbricks_configuration)
         .map_err(|e| e.into())
         .and_then(|ctxt| check_system(ctxt))
     {
         Ok(mut context) => {
-            let flowdirector_map=initialize_flowdirector(&context, &proxy_config);
+            let flowdirector_map=initialize_flowdirector(&context, &configuration);
             unsafe { fdir_get_infos(1u16); }
             context.start_schedulers();
 
             let (mtx, mrx) = channel::<MessageFrom>();
 
-            let proxy_config_cloned = proxy_config.clone();
+            let proxy_config_cloned = configuration.clone();
             let boxed_fss = Arc::new(f_select_server);
             let boxed_fpp = Arc::new(f_process_payload_c_s);
 
@@ -188,7 +188,7 @@ pub fn main() {
                 },
             ));
 
-            spawn_recv_thread(mrx, context, proxy_config);
+            spawn_recv_thread(mrx, context, configuration);
 
             //main loop
             println!("press ctrl-c to terminate proxy ...");
