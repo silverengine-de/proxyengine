@@ -236,6 +236,7 @@ fn delayed_binding_proxy() {
                 }
             }
 
+            thread::sleep(Duration::from_millis(500));  // give other threads some more time for exiting
             std::process::exit(0);
         }
         Err(ref e) => {
