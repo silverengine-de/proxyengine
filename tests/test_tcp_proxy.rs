@@ -212,7 +212,7 @@ fn delayed_binding_proxy() {
 
             thread::sleep(Duration::from_millis(2000 as u64)); // wait for the servers
 
-            unsafe { fdir_get_infos(1u16); }
+            if log_enabled!(log::Level::Debug)  { unsafe { fdir_get_infos(1u16); } }
             
             // emulate clients
 

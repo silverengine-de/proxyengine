@@ -24,8 +24,10 @@ use tcp_proxy::Connection;
 use tcp_proxy::Container;
 use tcp_proxy::errors::*;
 use tcp_proxy::L234Data;
-use tcp_proxy::MessageFrom;
+use tcp_proxy::{MessageFrom, MessageTo};
 use tcp_proxy::spawn_recv_thread;
+use tcp_proxy::ReleaseCause;
+use tcp_proxy::TcpState;
 
 pub fn main() {
     env_logger::init();
@@ -164,14 +166,13 @@ pub fn main() {
             let flowdirector_map=initialize_flowdirector(&context, &configuration);
             unsafe { fdir_get_infos(1u16); }
             context.start_schedulers();
-
             let (mtx, mrx) = channel::<MessageFrom>();
+            let (reply_mtx, reply_mrx) = channel::<MessageTo>();
 
             let proxy_config_cloned = configuration.clone();
+            let mtx_clone = mtx.clone();
             let boxed_fss = Arc::new(f_select_server);
             let boxed_fpp = Arc::new(f_process_payload_c_s);
-
-            let mtx_clone = mtx.clone();
 
             context.add_pipeline_to_run(Box::new(
                 move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
@@ -189,6 +190,9 @@ pub fn main() {
             ));
 
             spawn_recv_thread(mrx, context, configuration);
+            mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
+            // debug output on flow director:
+            if log_enabled!(log::Level::Debug)  { unsafe { fdir_get_infos(1u16); } }
 
             //main loop
             println!("press ctrl-c to terminate proxy ...");
@@ -197,7 +201,28 @@ pub fn main() {
             }
 
             mtx.send(MessageFrom::Exit).unwrap();
-            thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
+            thread::sleep(Duration::from_millis(2000 as u64)); // Sleep for a bit
+
+            match reply_mrx.recv_timeout(Duration::from_millis(5000)) {
+                Ok(MessageTo::ConRecords(con_records)) => {
+                    let mut completed_count = 0;
+                    for (_p, c) in &con_records {
+                        if c.get_release_cause() == ReleaseCause::FinServer
+                            && c.c_state.last().unwrap() == &TcpState::Closed
+                            && c.s_state.last().unwrap() == &TcpState::Closed
+                            {
+                                completed_count += 1
+                            };
+                    }
+                    debug!("completed connections: {}", completed_count);
+                }
+                Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
+                Err(e) => {
+                    error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
+                }
+            }
+
+            info!("terminating ProxyEngine ...");
             std::process::exit(0);
         }
         Err(ref e) => {
