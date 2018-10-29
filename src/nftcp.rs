@@ -124,6 +124,10 @@ pub fn setup_forwarder<F1, F2>(
     let mut l2groups = l2filter_from_pci.group_by(
         2,
         box move |p| {
+            if p.get_header().etype() != 0x0800 {
+                // everything other than Ipv4 we send to KNI
+                return 0
+            }
             let payload = p.get_payload();
             let ipflow = ipv4_extract_flow(payload);
             if (ipflow.dst_ip == pd_clone.ip) || (ipflow.dst_ip == ip_src) && ipflow.proto == 6 {
@@ -135,11 +139,12 @@ pub fn setup_forwarder<F1, F2>(
                     0
                 }
             } else {
-                debug!("{} sending to KNI: {}, dest-ip= {}, ip assigned to core = {}",
+                debug!("{} unexpected IP packet, sending to KNI: {}, dest-ip= {}, ip assigned to core = {}, proto= {}",
                     thread_id_1, 
                     p.get_header(), 
                     Ipv4Addr::from(ipflow.dst_ip), 
                     Ipv4Addr::from(ip_src),
+                    ipflow.proto,
                 );
                 0
             }
