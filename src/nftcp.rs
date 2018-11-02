@@ -90,7 +90,7 @@ pub fn setup_forwarder<F1, F2>(
             .send(pci.clone());
         let uuid = Uuid::new_v4();
         let name = String::from("Kni2Pci");
-        sched.add_runnable(Runnable::from_task(uuid, name, forward2pci).ready());
+        sched.add_runnable(Runnable::from_task(uuid, name, forward2pci).move_ready());
     }
 
     let thread_id = format!("<c{}, rx{}>: ", core, pci.rxq());
@@ -117,7 +117,7 @@ pub fn setup_forwarder<F1, F2>(
     let pipeline_id_clone = pipeline_id.clone();
     let uuid_l2groupby = Uuid::new_v4();
     let uuid_l2groupby_clone = uuid_l2groupby.clone();
-    let ip_src = sm.ip();
+    let pipeline_ip = sm.ip();
     let thread_id_1=thread_id.clone();
     // group the traffic into TCP traffic addressed to Proxy (group 1),
     // and send all other traffic to KNI (group 0)
@@ -130,7 +130,7 @@ pub fn setup_forwarder<F1, F2>(
             }
             let payload = p.get_payload();
             let ipflow = ipv4_extract_flow(payload);
-            if (ipflow.dst_ip == pd_clone.ip) || (ipflow.dst_ip == ip_src) && ipflow.proto == 6 {
+            if (ipflow.dst_ip == pd_clone.ip) || (ipflow.dst_ip == pipeline_ip) && ipflow.proto == 6 {
                 if ipflow.dst_port == pd_clone.port || ipflow.dst_port >= tcp_min_port {
                     //debug!("{} proxy tcp flow: {}", thread_id_1, ipflow);
                     1
@@ -143,7 +143,7 @@ pub fn setup_forwarder<F1, F2>(
                     thread_id_1, 
                     p.get_header(), 
                     Ipv4Addr::from(ipflow.dst_ip), 
-                    Ipv4Addr::from(ip_src),
+                    Ipv4Addr::from(pipeline_ip),
                     ipflow.proto,
                 );
                 0
@@ -552,7 +552,7 @@ pub fn setup_forwarder<F1, F2>(
                     } else if old_c_state == TcpState::Established
                         && old_s_state == TcpState::Listen {
                         // should be the first payload packet from client
-                        select_server(p, &mut c, &mut hs, &pd, ip_src, &f_select_server);
+                        select_server(p, &mut c, &mut hs, &pd, pipeline_ip, &f_select_server);
                         debug!("{} SYN packet to server - L3: {}, L4: {}", thread_id, hs.ip, p.get_header());
                         c.con_rec.s_state.push(TcpState::SynReceived);
                         group_index = 1;
@@ -572,7 +572,7 @@ pub fn setup_forwarder<F1, F2>(
                     if old_s_state >= TcpState::Established
                         && old_c_state >= TcpState::Established
                         && old_c_state < TcpState::Closed {
-                        client_to_server(p, &mut c, &mut hs, &pd, ip_src, &f_process_payload_c_s);
+                        client_to_server(p, &mut c, &mut hs, &pd, pipeline_ip, &f_process_payload_c_s);
                         group_index = 1;
                     }
                 }
@@ -675,15 +675,15 @@ pub fn setup_forwarder<F1, F2>(
     let pipe2pci = merge(vec![l4pciflow, l4dumpflow]).send(pci.clone());
     let uuid_pipe2kni = Uuid::new_v4();
     let name = String::from("Pipe2Kni");
-    sched.add_runnable(Runnable::from_task(uuid_pipe2kni, name, pipe2kni).unready());
+    sched.add_runnable(Runnable::from_task(uuid_pipe2kni, name, pipe2kni).move_unready());
     tx.send(MessageFrom::Task(pipeline_id.clone(), uuid_pipe2kni, TaskType::Pipe2Kni))
         .unwrap();
     let uuid_pipe2pci = Uuid::new_v4();
     let name = String::from("Pipe2Pci");
-    sched.add_runnable(Runnable::from_task(uuid_pipe2pci, name, pipe2pci).unready());
+    sched.add_runnable(Runnable::from_task(uuid_pipe2pci, name, pipe2pci).move_unready());
     tx.send(MessageFrom::Task(pipeline_id.clone(), uuid_pipe2pci, TaskType::Pipe2Pci))
         .unwrap();
     let uuid_consumer = Uuid::new_v4();
     let name = String::from("BypassPipe");
-    sched.add_runnable(Runnable::from_task(uuid_consumer, name, consumer.send(pci.clone())).unready());
+    sched.add_runnable(Runnable::from_task(uuid_consumer, name, consumer.send(pci.clone())).move_unready());
 }

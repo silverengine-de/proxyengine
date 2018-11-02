@@ -317,7 +317,7 @@ pub fn setup_pipelines<F1, F2>(
                 KniHandleRequest {
                     kni_port: kni.unwrap().port.clone(),
                 },
-            ).ready(), // this task must be ready from the beginning to enable managing the KNI i/f
+            ).move_ready(), // this task must be ready from the beginning to enable managing the KNI i/f
         );
     }
 
