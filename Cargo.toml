@@ -29,6 +29,7 @@ eui48 = { version= "0.3", features=["serde"] }
 error-chain = ">=0.12"
 uuid = { version = ">=0.7", features = ["v4"] }
 separator =  ">= 0.3"
+bincode = "*"
 
 [features]
 

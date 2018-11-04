@@ -5,6 +5,7 @@ extern crate env_logger;
 #[macro_use]
 extern crate log;
 extern crate tcp_proxy;
+extern crate bincode;
 
 use e2d2::config::{basic_opts, read_matches};
 use e2d2::interface::{ PortType, PortQueue};
@@ -19,6 +20,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
 use std::thread;
 use std::time::Duration;
+use std::net::SocketAddrV4;
+use std::convert::From;
+
 use tcp_proxy::{get_mac_from_ifname, read_config, setup_pipelines, initialize_flowdirector};
 use tcp_proxy::Connection;
 use tcp_proxy::Container;
@@ -108,8 +112,17 @@ pub fn main() {
 
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_select_server = move |c: &mut Connection| {
-        let remainder = c.get_client_sock().port().rotate_right(1) as usize % l234data.len();
-        c.server = Some(l234data[remainder].clone());
+        let socket=Box::new(bincode::deserialize::<SocketAddrV4>(&c.payload).expect("cannot deserialize SocketAddrV4"));
+
+        for l234 in &l234data {
+            if l234.port == socket.port() && l234.ip == u32::from(*socket.ip()) {
+                c.server=Some((*l234).clone());
+                break;
+            }
+        }
+
+        //let remainder = c.get_client_sock().port().rotate_right(1) as usize % l234data.len();
+        // c.server = Some(l234data[remainder].clone());
         // info!("selecting {}", proxy_config_cloned.servers[remainder].id);
         // initialize userdata
         if let Some(_) = c.userdata {

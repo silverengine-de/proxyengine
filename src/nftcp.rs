@@ -349,6 +349,7 @@ pub fn setup_forwarder<F1, F2>(
                     p.copy_payload_to_bytearray(&mut c.payload, payload_sz);
                     let old_payload_size = c.payload.len();
                     f_select_server(c);
+                    assert!(c.server.is_some());
                     // save server_id to connection record
                     c.con_rec.server_index = if c.server.is_some() {
                         c.server.as_ref().unwrap().index
