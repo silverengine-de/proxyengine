@@ -64,7 +64,7 @@ pub fn setup_forwarder<F1, F2>(
         tx.clone()
     );
 
-    let mut wheel = TimerWheel::new(128, 16 * MILLIS_TO_CYCLES, 128);
+    let mut wheel = TimerWheel::new(128, 100 * MILLIS_TO_CYCLES, 128);
 
     /*
     // setting up a a reverse message channel between this pipeline and the main program thread

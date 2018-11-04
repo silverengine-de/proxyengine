@@ -227,7 +227,7 @@ pub fn main() {
                                 completed_count += 1
                             };
                     }
-                    debug!("completed connections: {}", completed_count);
+                    info!("completed connections: {}", completed_count);
                 }
                 Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
                 Err(e) => {
