@@ -5,7 +5,10 @@ extern crate env_logger;
 #[macro_use]
 extern crate log;
 extern crate tcp_proxy;
-extern crate bincode;
+extern crate serde_json;
+extern crate uuid;
+#[macro_use]
+extern crate serde_derive;
 
 use e2d2::config::{basic_opts, read_matches};
 use e2d2::interface::{ PortType, PortQueue};
@@ -22,6 +25,8 @@ use std::thread;
 use std::time::Duration;
 use std::net::SocketAddrV4;
 use std::convert::From;
+
+use uuid::Uuid;
 
 use tcp_proxy::{get_mac_from_ifname, read_config, setup_pipelines, initialize_flowdirector};
 use tcp_proxy::Connection;
@@ -110,12 +115,24 @@ pub fn main() {
             index: i,
         }).collect();
 
+
+    #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+    pub struct CData {
+        // connection data sent as first payload packet
+        pub reply_socket: SocketAddrV4, // the socket on which the trafficengine expects the reply from the DUT
+        pub client_port: u16,
+        pub uuid: Option<Uuid>,
+
+    }
+
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_select_server = move |c: &mut Connection| {
-        let socket=Box::new(bincode::deserialize::<SocketAddrV4>(&c.payload).expect("cannot deserialize SocketAddrV4"));
+        //let socket=Box::new(bincode::deserialize::<SocketAddrV4>(&c.payload).expect("cannot deserialize SocketAddrV4"));
+        //String::from_utf8(*c.payload).expect("cannot convert utf8 to String");
+        let cdata:CData = serde_json::from_slice(&c.payload).expect("cannot deserialize CData");
 
         for l234 in &l234data {
-            if l234.port == socket.port() && l234.ip == u32::from(*socket.ip()) {
+            if l234.port == cdata.reply_socket.port() && l234.ip == u32::from(*cdata.reply_socket.ip()) {
                 c.server=Some((*l234).clone());
                 break;
             }
