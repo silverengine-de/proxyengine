@@ -11,6 +11,7 @@ extern crate uuid;
 extern crate serde_derive;
 extern crate netfcts;
 extern crate ipnet;
+extern crate separator;
 
 use e2d2::config::{basic_opts, read_matches};
 use e2d2::interface::{ PortType, PortQueue};
@@ -18,11 +19,12 @@ use e2d2::native::zcsi::*;
 use e2d2::scheduler::{initialize_system, NetBricksContext, StandaloneScheduler};
 use e2d2::allocators::CacheAligned;
 
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::env;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
+use std::sync::mpsc::RecvTimeoutError;
 use std::thread;
 use std::time::Duration;
 use std::net::SocketAddrV4;
@@ -31,9 +33,10 @@ use std::str::FromStr;
 
 use uuid::Uuid;
 use ipnet::Ipv4Net;
+use separator::Separatable;
 
 use netfcts::initialize_flowdirector;
-use netfcts::tcp_common::ReleaseCause;
+use netfcts::tcp_common::{ReleaseCause};
 
 use tcp_proxy::{get_mac_from_ifname, read_config, setup_pipelines};
 use tcp_proxy::Connection;
@@ -225,6 +228,8 @@ pub fn main() {
                 },
             ));
 
+            let cores = context.active_cores.clone();
+
             spawn_recv_thread(mrx, context, configuration);
             mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
             // debug output on flow director:
@@ -236,34 +241,89 @@ pub fn main() {
                 thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
             }
 
-            mtx.send(MessageFrom::Exit).unwrap();
-            thread::sleep(Duration::from_millis(2000 as u64)); // Sleep for a bit
+            println!("\nTask Performance Data:\n");
+            mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
+            thread::sleep(Duration::from_millis(1000 as u64));
 
-            match reply_mrx.recv_timeout(Duration::from_millis(5000)) {
-                Ok(MessageTo::CRecords(pipeline_id, con_records_c, con_records_s)) => {
-                    let mut completed_count_c = 0;
-                    for (_p, c) in &con_records_c {
-                        if c.get_release_cause() == ReleaseCause::PassiveClose
-                            && c.last_state() == &TcpState::Closed
-                            {
-                                completed_count_c += 1
-                            };
+            mtx.send(MessageFrom::FetchCounter).unwrap();
+            mtx.send(MessageFrom::FetchCRecords).unwrap();
+
+            let mut tcp_counters_c = HashMap::new();
+            let mut tcp_counters_s = HashMap::new();
+            let mut con_records = HashMap::new();
+
+            loop {
+                match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
+                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s)) => {
+                        println!("\n");
+                        println!("{}: client side {}", pipeline_id, tcp_counter_c);
+                        println!("{}: server side {}", pipeline_id, tcp_counter_s);
+                        tcp_counters_c.insert(pipeline_id.clone(), tcp_counter_c);
+                        tcp_counters_s.insert(pipeline_id, tcp_counter_s);
                     }
-                    let mut completed_count_s = 0;
-                    for (_p, c) in &con_records_s {
-                        if c.get_release_cause() == ReleaseCause::ActiveClose
-                            && c.last_state() == &TcpState::Closed
-                            {
-                                completed_count_s += 1
-                            };
+                    Ok(MessageTo::CRecords(pipeline_id, con_records_c, con_records_s)) => {
+                        debug!("{}: received CRecords", pipeline_id);
+                        con_records.insert(pipeline_id, (con_records_c, con_records_s));
                     }
-                    info!("{} completed connections  c/s: {}/{}", pipeline_id, completed_count_c, completed_count_s);
-                }
-                Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
-                Err(e) => {
-                    error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
+                    Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
+                    Err(RecvTimeoutError::Timeout) => {
+                        break;
+                    }
+                    Err(e) => {
+                        error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
+                        break;
+                    }
                 }
             }
+
+            let mut completed_count_c = 0;
+            for (_p, (con_recs, _)) in &con_records {
+                for c in con_recs.values() {
+                    if (c.get_release_cause() == ReleaseCause::PassiveClose || c.get_release_cause() == ReleaseCause::ActiveClose)
+                        && c.last_state() == &TcpState::Closed
+                        {
+                            completed_count_c += 1
+                        };
+                }
+            }
+
+            let mut completed_count_s = 0;
+            for (_p, (_, con_recs)) in &con_records{
+                for c in con_recs.values() {
+                    if (c.get_release_cause() == ReleaseCause::PassiveClose || c.get_release_cause() == ReleaseCause::ActiveClose)
+                        && c.last_state() == &TcpState::Closed
+                        {
+                            completed_count_s += 1
+                        };
+                }
+            }
+            info!("completed connections c/s: {}/{}", completed_count_c, completed_count_s );
+
+            for (p, (c_records_c, mut c_records_s)) in con_records {
+                info!("Pipeline {}:", p);
+                if c_records_c.len() > 0 {
+                    let mut completed_count = 0;
+                    let mut min = c_records_c.iter().last().unwrap().1;
+                    let mut max = min;
+                    c_records_c.iter().enumerate().for_each(|(i, (_, c))| {
+                        let uuid=c.uuid.as_ref().unwrap();
+                        let c_server = c_records_s.remove(uuid);
+                        info!("{:6}: {}", i, c);
+                        if c_server.is_some() { info!("        {}", c_server.unwrap()); }
+                        if (c.get_release_cause() == ReleaseCause::PassiveClose || c.get_release_cause() == ReleaseCause::ActiveClose) && c.states().last().unwrap() == &TcpState::Closed {
+                            completed_count += 1
+                        }
+                        if c.get_first_stamp().unwrap_or(u64::max_value()) < min.get_first_stamp().unwrap_or(u64::max_value()) { min = c }
+                        if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) { max = c }
+                        if i == (c_records_c.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some() {
+                            let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
+                            info!("total used cycles= {}, per connection = {}", total.separated_string(), (total / (i as u64 + 1)).separated_string());
+                        }
+                    });
+                }
+            }
+
+            mtx.send(MessageFrom::Exit).unwrap();
 
             info!("terminating ProxyEngine ...");
             std::process::exit(0);
