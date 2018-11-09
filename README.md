@@ -21,6 +21,8 @@ First install NetBricks. ProxyEngine needs the branch e2d2-rstade from the fork 
 
 Note, that a local installation of NetBricks is necessary as it includes DPDK and some C-libraries for interfacing the Rust code of NetBricks with the DPDK. As we need DPDK kernel modules, DPDK needs to be re-compiled each time the kernel version changes. This can be done with the script [build.sh](https://github.com/rstade/NetBricks/blob/e2d2-0-1-1/build.sh) of NetBricks. Note also that the Linux linker _ld_ needs to be made aware of the location of the .so libraries created by NetBricks. This can be solved using _ldconfig_.
 
+Secondly ProxyEngine depends on the crate _netfcts_ being part of [TrafficEngine](https://github.com/rstade/trafficengine). Currently you need to install TrafficEngine locally to get access to crate _netfcts_.
+
 ProxyEngine includes a main program bin.rs (using example configurations _\*.toml_) and test modules (using configurations _tests/\*.toml_). For both the network interfaces of the test machine need to be prepared (see [prepNet.sh](https://github.com/silverengine-de/proxyengine/blob/master/prepNet.sh)). 
 
 First a network interface for user-space DPDK is needed. This interface is used by the proxy to connect to clients and servers (in the example configuration this interface uses PCI slot 07:00.0). The current code is tested on physical servers with NIC X520-DA2 (82599) and recently also with NIC X710-DA2. Please note that X710 based NICs require that ProxyEngine is configured for IP address based RFS, because X710 does not allow for partial masking of TCP ports as it is possible with 82599 based NICs.
