@@ -6,6 +6,8 @@ extern crate time;
 extern crate log;
 extern crate env_logger;
 extern crate ipnet;
+extern crate netfcts;
+extern crate separator;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,8 +19,12 @@ use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::mpsc::channel;
 use std::fs::File;
+use std::collections::{HashSet, HashMap};
+use std::str::FromStr;
+use std::sync::mpsc::RecvTimeoutError;
 
 use ipnet::Ipv4Net;
+use separator::Separatable;
 
 use e2d2::config::{basic_opts, read_matches};
 use e2d2::native::zcsi::*;
@@ -27,18 +33,18 @@ use e2d2::scheduler::initialize_system;
 use e2d2::scheduler::StandaloneScheduler;
 use e2d2::allocators::CacheAligned;
 
+use netfcts::initialize_flowdirector;
+use netfcts::tcp_common::ReleaseCause;
+
 use tcp_proxy::Connection;
-use tcp_proxy::{read_config, initialize_flowdirector};
+use tcp_proxy::{read_config};
 use tcp_proxy::get_mac_from_ifname;
 use tcp_proxy::Container;
 use tcp_proxy::L234Data;
 use tcp_proxy::{MessageFrom, MessageTo};
 use tcp_proxy::spawn_recv_thread;
 use tcp_proxy::setup_pipelines;
-use tcp_proxy::ReleaseCause;
 use tcp_proxy::TcpState;
-
-use std::collections::HashSet;
 
 #[test]
 fn delayed_binding_proxy() {
@@ -62,8 +68,8 @@ fn delayed_binding_proxy() {
         info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
     }
 
-    let proxy_config = read_config(toml_file.trim()).expect("cannot read config from toml file");
-    if proxy_config.test_size.is_none() {
+    let configuration = read_config(toml_file.trim()).expect("cannot read config from toml file");
+    if configuration.test_size.is_none() {
         error!("missing parameter 'test_size' in configuration file");
         std::process::exit(1);
     };
@@ -97,9 +103,9 @@ fn delayed_binding_proxy() {
         Ok(m) => m,
         Err(f) => panic!(f.to_string()),
     };
-    let mut configuration = read_matches(&matches, &opts);
+    let mut netbricks_configuration = read_matches(&matches, &opts);
 
-    let l234data: Vec<L234Data> = proxy_config
+    let l234data: Vec<L234Data> = configuration
         .targets
         .iter()
         .enumerate()
@@ -113,7 +119,7 @@ fn delayed_binding_proxy() {
             index: i,
         }).collect();
 
-    let proxy_config_cloned = proxy_config.clone();
+    let proxy_config_cloned = configuration.clone();
 
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_select_server = move |c: &mut Connection| {
@@ -134,14 +140,14 @@ fn delayed_binding_proxy() {
     // this is the closure, which may modify the payload of client to server packets in a TCP connection
     let f_process_payload_c_s = |_c: &mut Connection, _payload: &mut [u8], _tailroom: usize| {};
 
-    match initialize_system(&mut configuration) {
+    match initialize_system(&mut netbricks_configuration) {
         Ok(mut context) => {
-            let flowdirector_map=initialize_flowdirector(&context, &proxy_config);
+            let flowdirector_map = initialize_flowdirector(&context, configuration.flow_steering_mode(), &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap());
             context.start_schedulers();
             let (mtx, mrx) = channel::<MessageFrom>();
             let (reply_mtx, reply_mrx) = channel::<MessageTo>();
 
-            let proxy_config_cloned = proxy_config.clone();
+            let proxy_config_cloned = configuration.clone();
             let boxed_fss = Arc::new(f_select_server);
             let boxed_fpp = Arc::new(f_process_payload_c_s);
             let mtx_clone = mtx.clone();
@@ -152,7 +158,7 @@ fn delayed_binding_proxy() {
                         core,
                         p,
                         s,
-                        &proxy_config_cloned,
+                        &proxy_config_cloned.engine,
                         boxed_fss.clone(),
                         boxed_fpp.clone(),
                         flowdirector_map.clone(),
@@ -161,14 +167,16 @@ fn delayed_binding_proxy() {
                 },
             ));
 
-            spawn_recv_thread(mrx, context, proxy_config.clone());
+            let cores = context.active_cores.clone();
+
+            spawn_recv_thread(mrx, context, configuration.clone());
             mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
 
             // emulate clients
-            let queries = proxy_config.test_size.unwrap();
+            let queries = configuration.test_size.unwrap();
             let proxy_addr = (
-                proxy_config.engine.ipnet.parse::<Ipv4Net>().unwrap().addr(),
-                proxy_config.engine.port,
+                configuration.engine.ipnet.parse::<Ipv4Net>().unwrap().addr(),
+                configuration.engine.port,
             );
             // for this test tcp client timeout must be shorter than timeouts by timer wheel
             let timeout = Duration::from_millis(50 as u64);
@@ -209,34 +217,97 @@ fn delayed_binding_proxy() {
                     }
                 });
             }
+            thread::sleep(Duration::from_millis(5000)); // Wait for client timeouts
 
-            thread::sleep(Duration::from_millis(5000)); // Sleep for a bit
+            println!("\nTask Performance Data:\n");
+            mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
+            thread::sleep(Duration::from_millis(1000 as u64));
 
-            mtx.send(MessageFrom::Exit).unwrap();
+            mtx.send(MessageFrom::FetchCounter).unwrap();
+            mtx.send(MessageFrom::FetchCRecords).unwrap();
 
-            match reply_mrx.recv_timeout(Duration::from_millis(5000)) {
-                Ok(MessageTo::ConRecords(con_records)) => {
-                    assert_eq!(con_records.len(), proxy_config.test_size.unwrap() * CLIENT_THREADS);
-                    let mut completed_count = 0;
-                    for (_p, c) in &con_records {
-                        if c.get_release_cause() == ReleaseCause::FinClient
-                            && c.c_state.last().unwrap() == &TcpState::Closed
-                            && c.s_state.last().unwrap() == &TcpState::Closed
-                        {
-                            completed_count += 1
-                        };
-                        assert_eq!(c.c_state,[TcpState::Closed, TcpState::SynSent, TcpState::Established, TcpState::FinWait2, TcpState::Closed]);
-                        assert_eq!(c.s_state,[TcpState::Listen, TcpState::SynReceived, TcpState::Closed]);
+            let mut tcp_counters_c = HashMap::new();
+            let mut tcp_counters_s = HashMap::new();
+            let mut con_records = HashMap::new();
+
+            loop {
+                match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
+                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s)) => {
+                        println!("\n");
+                        println!("{}: client side {}", pipeline_id, tcp_counter_c);
+                        println!("{}: server side {}", pipeline_id, tcp_counter_s);
+                        tcp_counters_c.insert(pipeline_id.clone(), tcp_counter_c);
+                        tcp_counters_s.insert(pipeline_id, tcp_counter_s);
                     }
-                    assert_eq!(completed_count, proxy_config.test_size.unwrap() * CLIENT_THREADS);
-                }
-                Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
-                Err(e) => {
-                    error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
+                    Ok(MessageTo::CRecords(pipeline_id, con_records_c, con_records_s)) => {
+                        debug!("{}: received CRecords", pipeline_id);
+                        con_records.insert(pipeline_id, (con_records_c, con_records_s));
+                    }
+                    Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
+                    Err(RecvTimeoutError::Timeout) => {
+                        break;
+                    }
+                    Err(e) => {
+                        error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
+                    }
                 }
             }
 
-            thread::sleep(Duration::from_millis(500));  // give other threads some more time for exiting
+            for (p, (c_records_c, _c_records_s)) in &con_records {
+                info!("Pipeline {}:", p);
+                if c_records_c.len() > 0 {
+                    let mut completed_count = 0;
+                    let mut min = c_records_c.iter().last().unwrap().1;
+                    let mut max = min;
+                    c_records_c.iter().enumerate().for_each(|(i, (_, c))| {
+                        info!("{:6}: {}", i, c);
+                        if (c.get_release_cause() == ReleaseCause::PassiveClose || c.get_release_cause() == ReleaseCause::ActiveClose) && c.states().last().unwrap() == &TcpState::Closed {
+                            completed_count += 1
+                        }
+                        if c.get_first_stamp().unwrap_or(u64::max_value()) < min.get_first_stamp().unwrap_or(u64::max_value()) { min = c }
+                        if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) { max = c }
+                        if i == (c_records_c.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some() {
+                            let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
+                            info!("total used cycles= {}, per connection = {}", total.separated_string(), (total / (i as u64 + 1)).separated_string());
+                        }
+                    });
+                }
+            }
+
+
+            let mut completed_count_c = 0;
+            for (_p, (con_recs, _)) in &con_records {
+                for c in con_recs.values() {
+                    if c.get_release_cause() == ReleaseCause::ActiveClose
+                        && c.last_state() == &TcpState::Closed
+                        {
+                            completed_count_c += 1
+                        };
+                    assert_eq!(c.states(), [TcpState::Closed, TcpState::SynSent, TcpState::Established, TcpState::FinWait1, TcpState::Closed]);
+                }
+            }
+
+
+            let mut completed_count_s = 0;
+            for (_p, (_, con_recs)) in &con_records{
+                for c in con_recs.values() {
+                    if c.get_release_cause() == ReleaseCause::PassiveClose
+                        && c.last_state() == &TcpState::Closed
+                        {
+                            completed_count_s += 1
+                        };
+                    assert_eq!(c.states(), [TcpState::Listen, TcpState::SynReceived, TcpState::LastAck, TcpState::Closed]);
+                }
+            }
+
+            info!("completed connections c/s: {}/{}", completed_count_c, completed_count_s );
+            assert_eq!(completed_count_c, configuration.test_size.unwrap() * CLIENT_THREADS);
+            assert_eq!(completed_count_s, configuration.test_size.unwrap() * CLIENT_THREADS);
+
+            mtx.send(MessageFrom::Exit).unwrap();
+            thread::sleep(Duration::from_millis(2000));
+
+            info!("terminating ProxyEngine ...");
             std::process::exit(0);
         }
         Err(ref e) => {

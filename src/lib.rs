@@ -18,15 +18,18 @@ extern crate serde;
 extern crate uuid;
 #[macro_use]
 extern crate error_chain;
+extern crate netfcts;
 
 pub mod nftcp;
-
-pub use cmanager::{Connection, L234Data, ReleaseCause, UserData, ConRecord, TcpState};
-
 pub mod errors;
 mod cmanager;
-mod timer_wheel;
 
+pub use netfcts::tcp_common::{CData, L234Data, UserData, TcpRole, TcpState, TcpCounter, TcpStatistics};
+pub use netfcts::ConRecord;
+pub use cmanager:: Connection;
+
+use netfcts::tasks::TaskType;
+use netfcts::tasks::KniHandleRequest;
 use ipnet::Ipv4Net;
 use eui48::MacAddress;
 use uuid::Uuid;
@@ -36,12 +39,12 @@ use e2d2::native::zcsi::*;
 use e2d2::common::ErrorKind as E2d2ErrorKind;
 use e2d2::scheduler::*;
 use e2d2::allocators::CacheAligned;
-use e2d2::interface::{PortQueue, PmdPort, PortType, FlowDirector};
+use e2d2::interface::{PortQueue, PmdPort, FlowDirector};
 
 use errors::*;
 use nftcp::setup_forwarder;
+use netfcts::{is_kni_core, setup_kni, FlowSteeringMode};
 
-use std::process::Command;
 use std::fs::File;
 use std::io::Read;
 use std::any::Any;
@@ -57,15 +60,8 @@ use std::thread;
 use std::time::Duration;
 use std::sync::mpsc::RecvTimeoutError;
 use std::fmt;
-use std::cmp::Ordering;
 use std::str::FromStr;
 
-#[derive(Deserialize, Clone, Copy, PartialEq)]
-pub enum FlowSteeringMode {
-    Port,
-    // default
-    Ip,
-}
 
 #[derive(Deserialize)]
 struct Config {
@@ -268,7 +264,7 @@ pub fn setup_pipelines<F1, F2>(
     core: i32,
     ports: HashSet<CacheAligned<PortQueue>>,
     sched: &mut StandaloneScheduler,
-    proxy_config: &Configuration,
+    engine_config: &EngineConfig,
     f_select_server: Arc<F1>,
     f_process_payload_c_s: Arc<F2>,
     flowdirector_map: HashMap<i32, Arc<FlowDirector>>,
@@ -316,6 +312,7 @@ pub fn setup_pipelines<F1, F2>(
                 name,
                 KniHandleRequest {
                     kni_port: kni.unwrap().port.clone(),
+                    last_tick: 0,
                 },
             ).move_ready(), // this task must be ready from the beginning to enable managing the KNI i/f
         );
@@ -326,7 +323,7 @@ pub fn setup_pipelines<F1, F2>(
         pci.unwrap(),
         kni.unwrap(),
         sched,
-        proxy_config,
+        engine_config,
         f_select_server,
         f_process_payload_c_s,
         flowdirector_map,
@@ -347,203 +344,30 @@ impl fmt::Display for PipelineId {
     }
 }
 
-#[derive(Debug)]
-pub enum TaskType {
-    TcpGenerator = 0,
-    Pipe2Kni = 1,
-    Pipe2Pci = 2,
-    NoTaskTypes = 3, // for iteration over TaskType
-}
-
 pub enum MessageFrom {
     Channel(PipelineId, Sender<MessageTo>),
-    CRecord(PipelineId, ConRecord),
-    ClientSyn(PipelineId, ConRecord),
     Established(PipelineId, ConRecord),
-    GenTimeStamp(PipelineId, u64, u64, u64),
-    // generator timestamps : pipeline, count of sent syn, tsc-value
+    GenTimeStamp(PipelineId, &'static str, usize, u64, u64),
     StartEngine(Sender<MessageTo>),
     Task(PipelineId, Uuid, TaskType),
-    PrintPerformance(Vec<i32>),
-    // performance for the cores selected by the indices
+    PrintPerformance(Vec<i32>), // performance of tasks on cores selected by indices
+    Counter(PipelineId, TcpCounter, TcpCounter),
+    CRecords(PipelineId, HashMap<Uuid, ConRecord>, HashMap<Uuid, ConRecord>), // pipeline_id, client, server
+    FetchCounter, // triggers fetching of counters from pipelines
+    FetchCRecords,
     Exit, // exit recv thread
 }
 
 pub enum MessageTo {
-    Hello,
-    ConRecords(Vec<(PipelineId, ConRecord)>),
+    FetchCounter, // fetch counters from pipeline
+    FetchCRecords,
+    Counter(PipelineId, TcpCounter, TcpCounter),
+    CRecords(PipelineId, HashMap<Uuid, ConRecord>, HashMap<Uuid, ConRecord>),
+    StartGenerator,
     Exit, // exit recv thread
 }
 
 
-fn get_tcp_port_base(port: &PmdPort , count: u16) -> u16 {
-    let port_mask = port.get_tcp_dst_port_mask();
-    port_mask - count * (!port_mask + 1)
-}
-
-
-pub fn initialize_flowdirector(context:&NetBricksContext, configuration: &Configuration) -> HashMap<i32, Arc<FlowDirector>> {
-    let mut fdir_map: HashMap<i32, Arc<FlowDirector>>= HashMap::new();
-    for port in  context.ports.values() {
-        if *port.port_type() == PortType::Dpdk {
-            // initialize flow director on port, cannot do this in parallel from multiple threads
-            let mut flowdir= FlowDirector::new(port.clone());
-            let ip_address = &configuration.engine.ipnet;
-            let ip_addr_first = Ipv4Net::from_str(ip_address).unwrap().addr();
-            for (i, core) in context.active_cores.iter().enumerate() {
-                match context.rx_queues.get(&core) {    // retrieve all rx queues for this core
-                    Some(set) => match set.iter().last() {  // select one (should be the only one)
-                        Some(queue) => {
-                            match configuration.flow_steering_mode() {
-                                FlowSteeringMode::Ip => {
-                                    let dst_ip= u32::from(ip_addr_first) + i as u32 +1;
-                                    let dst_port = port.get_tcp_dst_port_mask();
-                                    debug!("set fdir filter on port {} for rfs mode IP: queue= {}, ip= {}, port base = {}",
-                                           port.port_id(),
-                                           queue.rxq(),
-                                           Ipv4Addr::from(dst_ip),
-                                           dst_port,
-                                    );
-                                    flowdir.add_fdir_filter(
-                                        queue.rxq(),
-                                        dst_ip,
-                                        dst_port,
-                                    ).unwrap();
-                                }
-                                FlowSteeringMode::Port => {
-                                    let dst_ip= u32::from(ip_addr_first);
-                                    let dst_port= get_tcp_port_base(port, i as u16);
-                                    debug!("set fdir filter on port {} for rfs mode Port: queue= {}, ip= {}, port base = {}",
-                                           port.port_id(),
-                                           queue.rxq(),
-                                           Ipv4Addr::from(dst_ip),
-                                           dst_port,
-                                    );
-                                    flowdir.add_fdir_filter(
-                                        queue.rxq(),
-                                        dst_ip,
-                                        dst_port,
-                                    ).unwrap();
-                                }
-                            }
-                        }
-                        None => (),
-                    }
-                    None => (),
-                }
-            }
-            fdir_map.insert(port.port_id(), Arc::new(flowdir));
-        }
-    }
-    fdir_map
-}
-
-pub struct KniHandleRequest {
-    pub kni_port: Arc<PmdPort>,
-}
-
-impl Executable for KniHandleRequest {
-    fn execute(&mut self) -> u32 {
-        unsafe {
-            rte_kni_handle_request(self.kni_port.get_kni());
-        }
-        1
-    }
-}
-
-pub fn is_kni_core(pci: &CacheAligned<PortQueue>) -> bool {
-    pci.rxq() == 0
-}
-
-pub fn setup_kni(kni_name: &str, configuration: &Configuration, ip_address_count: usize) {
-    let ip_address=&configuration.engine.ipnet;
-    let ip_addr_first= Ipv4Net::from_str(ip_address).unwrap().addr();
-    let prefix_len= Ipv4Net::from_str(ip_address).unwrap().prefix_len();
-    let mac_address = &configuration.engine.mac;
-    let kni_netns= &configuration.engine.namespace;
-
-
-    debug!("setup_kni");
-    //# ip link set dev vEth1 address XX:XX:XX:XX:XX:XX
-    let output = Command::new("ip")
-        .args(&["link", "set", "dev", kni_name, "address", mac_address])
-        .output()
-        .expect("failed to assign MAC address to kni i/f");
-    let reply = output.stderr;
-
-    debug!(
-        "assigning MAC addr {} to {}: {}, {}",
-        mac_address,
-        kni_name,
-        output.status,
-        String::from_utf8_lossy(&reply)
-    );
-
-    //# ip netns add nskni
-    let output = Command::new("ip")
-        .args(&["netns", "add", kni_netns])
-        .output()
-        .expect("failed to create namespace for kni i/f");
-    let reply = output.stderr;
-
-    debug!(
-        "creating network namespace {}: {}, {}",
-        kni_netns,
-        output.status,
-        String::from_utf8_lossy(&reply)
-    );
-
-    // ip link set dev vEth1 netns nskni
-    let output = Command::new("ip")
-        .args(&["link", "set", "dev", kni_name, "netns", kni_netns])
-        .output()
-        .expect("failed to move kni i/f to namespace");
-    let reply = output.stderr;
-
-    debug!(
-        "moving kni i/f {} to namesapce {}: {}, {}",
-        kni_name,
-        kni_netns,
-        output.status,
-        String::from_utf8_lossy(&reply)
-    );
-    for i in 0..ip_address_count {
-        // e.g. ip netns exec nskni ip addr add w.x.y.z/24 dev vEth1
-        let ip_net = Ipv4Net::new(Ipv4Addr::from(u32::from(ip_addr_first) + i as u32), prefix_len).unwrap().to_string();
-        let output = Command::new("ip")
-            .args(&["netns", "exec", kni_netns, "ip", "addr", "add", &ip_net, "dev", kni_name])
-            .output()
-            .expect("failed to assign IP address to kni i/f");
-        let reply = output.stderr;
-        debug!(
-            "assigning IP addr {} to {}: {}, {}",
-            ip_net,
-            kni_name,
-            output.status,
-            String::from_utf8_lossy(&reply)
-        );
-    }
-    // e.g. ip netns exec nskni ip link set dev vEth1 up
-    let output1 = Command::new("ip")
-        .args(&["netns", "exec", kni_netns, "ip", "link", "set", "dev", kni_name, "up"])
-        .output()
-        .expect("failed to set kni i/f up");
-    let reply1 = output1.stderr;
-    debug!(
-        "ip netns exec {} ip link set dev {} up: {}, {}",
-        kni_netns,
-        kni_name,
-        output1.status,
-        String::from_utf8_lossy(&reply1)
-    );
-    // e.g. ip netns exec nskni ip addr show dev vEth1
-    let output2 = Command::new("ip")
-        .args(&["netns", "exec", kni_netns, "ip", "addr", "show", "dev", kni_name])
-        .output()
-        .expect("failed to show IP address of kni i/f");
-    let reply2 = output2.stdout;
-    info!("show IP addr: {}\n {}", output.status, String::from_utf8_lossy(&reply2));
-}
 
 pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksContext, configuration: Configuration) {
     /*
@@ -552,7 +376,7 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
     let _handle = thread::spawn(move || {
         let mut senders = HashMap::new();
         let mut tasks: Vec<Vec<(PipelineId, Uuid)>> = Vec::with_capacity(TaskType::NoTaskTypes as usize);
-        let mut con_records: Vec<(PipelineId, ConRecord)> = Vec::with_capacity(5000);
+        let mut start_tsc: HashMap<(PipelineId, &'static str), u64> = HashMap::new();   // start time stamps for tasks
         let mut reply_to_main = None;
 
         for _t in 0..TaskType::NoTaskTypes as usize {
@@ -571,9 +395,12 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
             if port.is_kni() {
                 setup_kni(
                     port.linux_if().unwrap(),
-                    &configuration,
+                    &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap(),
+                    &configuration.engine.mac,
+                    &configuration.engine.namespace,
                     if configuration.flow_steering_mode() == FlowSteeringMode::Ip { context.active_cores.len() +1 } else { 1 },
                 );
+
             }
         }
 
@@ -581,30 +408,14 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
             match mrx.recv_timeout(Duration::from_millis(60000)) {
                 Ok(MessageFrom::StartEngine(reply_channel)) => {
                     reply_to_main = Some(reply_channel);
-                    // distribute message to all pipelines
                     debug!("received StartEngine");
-                    /*
-                    for t in 0..TaskType::NoTaskTypes as usize {
-                        debug!("starting tasks {:?}", t);
-                        for (pipeline_id, uuid) in &tasks[t] {
-                            let sync_sender = context.scheduler_channels.get(&(pipeline_id.core as i32));
-                            if sync_sender.is_some() {
-                                sync_sender.unwrap().send(SchedulerCommand::SetTaskState(uuid.clone(), true)).unwrap();
-                            }
-                        }
-                    } */
+
                     for s in &context.scheduler_channels {
                         s.1.send(SchedulerCommand::SetTaskStateAll(true)).unwrap();
                     }
                 }
                 Ok(MessageFrom::PrintPerformance(indices)) => {
                     for i in &indices {
-                        context
-                            .scheduler_channels
-                            .get(i)
-                            .unwrap()
-                            .send(SchedulerCommand::SetTaskStateAll(false))
-                            .unwrap();
                         context
                             .scheduler_channels
                             .get(i)
@@ -617,96 +428,89 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                     debug!("{}: task uuid= {}, type={:?}", pipeline_id, uuid, task_type);
                     tasks[task_type as usize].push((pipeline_id, uuid));
                 }
-                Ok(MessageFrom::GenTimeStamp(pipeline_id, syn_count, tsc0, tsc1)) => info!(
-                    "pipe {}: GenTimeStamp -> count= {}, tsc0= {}, tsc1= {}",
-                    pipeline_id,
-                    syn_count,
-                    tsc0.separated_string(),
-                    tsc1.separated_string(),
-                ),
+                Ok(MessageFrom::GenTimeStamp(pipeline_id, item, count, tsc0, tsc1)) => {
+                    debug!(
+                        "pipe {}: GenTimeStamp for item {} -> count= {}, tsc0= {}, tsc1= {}",
+                        pipeline_id,
+                        item,
+                        count,
+                        tsc0.separated_string(),
+                        tsc1.separated_string(),
+                    );
+                    if count == 0 {
+                        start_tsc.insert((pipeline_id, item), tsc0);
+                    } else {
+                        let diff = tsc0 - start_tsc.get(&(pipeline_id.clone(), item)).unwrap();
+                        info!(
+                            "pipe {}: item= {}, count= {}, elapsed= {} cy, per count= {} cy",
+                            pipeline_id,
+                            item,
+                            count,
+                            diff.separated_string(),
+                            diff / count as u64,
+                        );
+                    };
+                }
                 Ok(MessageFrom::Channel(pipeline_id, sender)) => {
                     debug!("got sender from {}", pipeline_id);
-                    sender.send(MessageTo::Hello).unwrap();
                     senders.insert(pipeline_id, sender);
                 }
                 Ok(MessageFrom::Exit) => {
                     debug!("received Exit");
+                    // stop all tasks on all schedulers
+                    for s in context.scheduler_channels.values() {
+                        s.send(SchedulerCommand::SetTaskStateAll(false)).unwrap();
+                    }
+
                     print_hard_statistics(1u16);
 
                     for port in context.ports.values() {
                         println!("Port {}:{}", port.port_type(), port.port_id());
                         port.print_soft_statistics();
                     }
-                    println!("Connection Records ...");
-                    let cmp = |a: &(PipelineId, ConRecord), b: &(PipelineId, ConRecord)| {
-                        let ordering = a.1.client_sock.ip().cmp(b.1.client_sock.ip());
-                        if ordering == Ordering::Equal {
-                            a.1.client_sock.port().cmp(&b.1.client_sock.port())
-                        } else { ordering }
-                    };
-                    con_records.sort_by(cmp);
-                    for (p, con_record) in &con_records {
-                        info!(
-                            "CRecord: pipe {}, c-sock={}, p_port= {}, hold = {:12} cy, c/s-setup = {:8} cy/{:8} cy, {}, c/s_state = {:?}/{:?}, rc = {:?}",
-                            p,
-                            con_record.client_sock,
-                            con_record.p_port,
-                            con_record.con_hold,
-                            con_record.c_ack_recv - con_record.c_syn_recv,
-                            con_record.s_ack_sent - con_record.s_syn_sent,
-                            con_record.server_index,
-                            con_record.c_state,
-                            con_record.s_state,
-                            con_record.get_release_cause(),
-                        );
-                    }
-                    if reply_to_main.is_some() { reply_to_main.unwrap().send(MessageTo::ConRecords(con_records)).unwrap(); }
+                    println!("terminating ProxyEngine ...");
                     context.stop();
-                    /*
-                    senders.values().for_each(|ref tx| {
-                        tx.send(MessageTo::Exit).unwrap();
-                    });
-                    // give receivers time to read the Exit message before closing the channel
-                    thread::sleep(Duration::from_millis(200 as u64));
-                    */
                     break;
-                }
-                Ok(MessageFrom::CRecord(pipe, con_record)) => {
-                    debug!(
-                        "CRecord: pipe {}, p_port= {}, hold = {:12} cy, c/s-setup = {:8} cy/{:8} cy, {}, c/s_state = {:?}/{:?}, rc = {:?}",
-                        pipe,
-                        con_record.p_port,
-                        con_record.con_hold,
-                        con_record.c_ack_recv - con_record.c_syn_recv,
-                        con_record.s_ack_sent - con_record.s_syn_sent,
-                        con_record.server_index,
-                        con_record.c_state,
-                        con_record.s_state,
-                        con_record.get_release_cause(),
-                    );
-                    con_records.push((pipe, con_record));
-                }
-                Ok(MessageFrom::ClientSyn(pipe, con_record)) => {
-                    debug!(
-                        "ClientSyn: pipe {}: p_port= {}, c-sock={}",
-                        pipe,
-                        con_record.p_port,
-                        con_record.client_sock,
-                    );
-                    con_records.push((pipe, con_record));
                 }
                 Ok(MessageFrom::Established(pipe, con_record)) => {
                     debug!(
-                        "Established: pipe {}: p_port= {}, c-sock={},  c/s-setup = {:8} cy/{:8} cy, {} ",
+                        "Established: {}: port= {}, c-sock={},  {} ",
                         pipe,
-                        con_record.p_port,
-                        con_record.client_sock,
-                        con_record.c_ack_recv - con_record.c_syn_recv,
-                        con_record.s_ack_sent - con_record.s_syn_sent,
+                        con_record.port,
+                        con_record.sock.unwrap(),
                         con_record.server_index,
                     );
-                    con_records.push((pipe, con_record));
                 }
+                Ok(MessageFrom::Counter(pipeline_id, tcp_counter_c, tcp_counter_s)) => {
+                    debug!("{}: received Counter", pipeline_id);
+                    if reply_to_main.is_some() {
+                        reply_to_main
+                            .as_ref()
+                            .unwrap()
+                            .send(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s))
+                            .unwrap();
+                    };
+                }
+                Ok(MessageFrom::FetchCounter) => {
+                    for (_p, s) in &senders {
+                        s.send(MessageTo::FetchCounter).unwrap();
+                    }
+                }
+                Ok(MessageFrom::CRecords(pipeline_id, c_records_client, c_records_server)) => {
+                    if reply_to_main.is_some() {
+                        reply_to_main
+                            .as_ref()
+                            .unwrap()
+                            .send(MessageTo::CRecords(pipeline_id, c_records_client, c_records_server))
+                            .unwrap();
+                    };
+                }
+                Ok(MessageFrom::FetchCRecords) => {
+                    for (_p, s) in &senders {
+                        s.send(MessageTo::FetchCRecords).unwrap();
+                    }
+                }
+
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(e) => {
                     error!("error receiving from message channel: {}", e);

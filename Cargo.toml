@@ -1,6 +1,6 @@
 [package]
 name = "proxyengine"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Rainer Stademann <rainer.stademann@silverengine.de>"]
 
 [lib]
@@ -13,7 +13,8 @@ path = "src/bin.rs"
 
 
 [dependencies]
-e2d2 = { version = "=0.3.4", path = "../../work/NetBricks/framework", features = ["performance"] }
+e2d2 = { version = "=0.3.4", path = "../NetBricks/framework", features = ["performance"] }
+netfcts={ version="0.1.0", path = "../trafficengine/netfcts" }
 rand = "0.3"
 fnv = "*"
 log = "0.4"
@@ -21,7 +22,7 @@ env_logger = "0.5"
 nix = "0.10.0"
 ctrlc = { version = "~3", features = ["termination"] }
 time = ">=0.1.0"
-ipnet = "1.0"
+ipnet = ">=1.0"
 toml = "0.4"
 serde = "1.0"
 serde_derive = "1.0"

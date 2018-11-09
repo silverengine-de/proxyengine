@@ -9,6 +9,8 @@ extern crate serde_json;
 extern crate uuid;
 #[macro_use]
 extern crate serde_derive;
+extern crate netfcts;
+extern crate ipnet;
 
 use e2d2::config::{basic_opts, read_matches};
 use e2d2::interface::{ PortType, PortQueue};
@@ -25,17 +27,21 @@ use std::thread;
 use std::time::Duration;
 use std::net::SocketAddrV4;
 use std::convert::From;
+use std::str::FromStr;
 
 use uuid::Uuid;
+use ipnet::Ipv4Net;
 
-use tcp_proxy::{get_mac_from_ifname, read_config, setup_pipelines, initialize_flowdirector};
+use netfcts::initialize_flowdirector;
+use netfcts::tcp_common::ReleaseCause;
+
+use tcp_proxy::{get_mac_from_ifname, read_config, setup_pipelines};
 use tcp_proxy::Connection;
 use tcp_proxy::Container;
 use tcp_proxy::errors::*;
 use tcp_proxy::L234Data;
 use tcp_proxy::{MessageFrom, MessageTo};
 use tcp_proxy::spawn_recv_thread;
-use tcp_proxy::ReleaseCause;
 use tcp_proxy::TcpState;
 
 pub fn main() {
@@ -193,7 +199,7 @@ pub fn main() {
         .and_then(|ctxt| check_system(ctxt))
     {
         Ok(mut context) => {
-            let flowdirector_map=initialize_flowdirector(&context, &configuration);
+            let flowdirector_map = initialize_flowdirector(&context, configuration.flow_steering_mode(), &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap());
             unsafe { fdir_get_infos(1u16); }
             context.start_schedulers();
             let (mtx, mrx) = channel::<MessageFrom>();
@@ -210,7 +216,7 @@ pub fn main() {
                         core,
                         p,
                         s,
-                        &proxy_config_cloned,
+                        &proxy_config_cloned.engine,
                         boxed_fss.clone(),
                         boxed_fpp.clone(),
                         flowdirector_map.clone(),
@@ -234,17 +240,24 @@ pub fn main() {
             thread::sleep(Duration::from_millis(2000 as u64)); // Sleep for a bit
 
             match reply_mrx.recv_timeout(Duration::from_millis(5000)) {
-                Ok(MessageTo::ConRecords(con_records)) => {
-                    let mut completed_count = 0;
-                    for (_p, c) in &con_records {
-                        if c.get_release_cause() == ReleaseCause::FinServer
-                            && c.c_state.last().unwrap() == &TcpState::Closed
-                            && c.s_state.last().unwrap() == &TcpState::Closed
+                Ok(MessageTo::CRecords(pipeline_id, con_records_c, con_records_s)) => {
+                    let mut completed_count_c = 0;
+                    for (_p, c) in &con_records_c {
+                        if c.get_release_cause() == ReleaseCause::PassiveClose
+                            && c.last_state() == &TcpState::Closed
                             {
-                                completed_count += 1
+                                completed_count_c += 1
                             };
                     }
-                    info!("completed connections: {}", completed_count);
+                    let mut completed_count_s = 0;
+                    for (_p, c) in &con_records_s {
+                        if c.get_release_cause() == ReleaseCause::ActiveClose
+                            && c.last_state() == &TcpState::Closed
+                            {
+                                completed_count_s += 1
+                            };
+                    }
+                    info!("{} completed connections  c/s: {}/{}", pipeline_id, completed_count_c, completed_count_s);
                 }
                 Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
                 Err(e) => {

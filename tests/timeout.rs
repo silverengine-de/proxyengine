@@ -6,6 +6,7 @@ extern crate time;
 extern crate log;
 extern crate env_logger;
 extern crate ipnet;
+extern crate netfcts;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,6 +19,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::mpsc::channel;
 use std::collections::{ HashSet};
 use std::fs::File;
+use std::str::FromStr;
 
 use ipnet::Ipv4Net;
 
@@ -27,15 +29,17 @@ use e2d2::interface::{ PortQueue};
 use e2d2::scheduler::{initialize_system, StandaloneScheduler};
 use e2d2::allocators::CacheAligned;
 
+use netfcts::initialize_flowdirector;
+use netfcts::tcp_common::ReleaseCause;
+
 use tcp_proxy::Connection;
-use tcp_proxy::{read_config, initialize_flowdirector};
+use tcp_proxy::{read_config, };
 use tcp_proxy::get_mac_from_ifname;
 use tcp_proxy::setup_pipelines;
 use tcp_proxy::Container;
 use tcp_proxy::L234Data;
 use tcp_proxy::{ MessageFrom, MessageTo };
 use tcp_proxy::spawn_recv_thread;
-use tcp_proxy::ReleaseCause;
 
 #[test]
 fn delayed_binding_proxy() {
@@ -59,9 +63,9 @@ fn delayed_binding_proxy() {
         info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
     }
 
-    let proxy_config = read_config(toml_file.trim()).unwrap();
+    let configuration = read_config(toml_file.trim()).unwrap();
 
-    if proxy_config.test_size.is_none() {
+    if configuration.test_size.is_none() {
         error!("missing parameter 'test_size' in configuration file");
         std::process::exit(1);
     };
@@ -95,9 +99,9 @@ fn delayed_binding_proxy() {
         Ok(m) => m,
         Err(f) => panic!(f.to_string()),
     };
-    let mut configuration = read_matches(&matches, &opts);
+    let mut netbricks_configuration = read_matches(&matches, &opts);
 
-    let l234data: Vec<L234Data> = proxy_config
+    let l234data: Vec<L234Data> = configuration
         .targets
         .iter()
         .enumerate()
@@ -111,7 +115,7 @@ fn delayed_binding_proxy() {
             index: i,
         }).collect();
 
-    let proxy_config_cloned = proxy_config.clone();
+    let proxy_config_cloned = configuration.clone();
 
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_select_server = move |c: &mut Connection| {
@@ -132,14 +136,14 @@ fn delayed_binding_proxy() {
     // this is the closure, which may modify the payload of client to server packets in a TCP connection
     let f_process_payload_c_s = |_c: &mut Connection, _payload: &mut [u8], _tailroom: usize| {};
 
-    match initialize_system(&mut configuration) {
+    match initialize_system(&mut netbricks_configuration) {
         Ok(mut context) => {
-            let flowdirector_map=initialize_flowdirector(&context, &proxy_config);
+            let flowdirector_map = initialize_flowdirector(&context, configuration.flow_steering_mode(), &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap());
             context.start_schedulers();
             let (mtx, mrx) = channel::<MessageFrom>();
             let (reply_mtx, reply_mrx) = channel::<MessageTo>();
 
-            let proxy_config_cloned = proxy_config.clone();
+            let proxy_config_cloned = configuration.clone();
             let boxed_fss = Arc::new(f_select_server);
             let boxed_fpp = Arc::new(f_process_payload_c_s);
 
@@ -151,7 +155,7 @@ fn delayed_binding_proxy() {
                         core,
                         p,
                         s,
-                        &proxy_config_cloned,
+                        &proxy_config_cloned.engine,
                         boxed_fss.clone(),
                         boxed_fpp.clone(),
                         flowdirector_map.clone(),
@@ -160,15 +164,15 @@ fn delayed_binding_proxy() {
                 },
             ));
 
-            spawn_recv_thread(mrx, context, proxy_config.clone());
+            spawn_recv_thread(mrx, context, configuration.clone());
 
             mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
 
             // emulate clients
-            let queries = proxy_config.test_size.unwrap();
+            let queries = configuration.test_size.unwrap();
             let proxy_addr = (
-                proxy_config.engine.ipnet.parse::<Ipv4Net>().unwrap().addr(),
-                proxy_config.engine.port,
+                configuration.engine.ipnet.parse::<Ipv4Net>().unwrap().addr(),
+                configuration.engine.port,
             );
             let timeout = Duration::from_millis(6000 as u64);
 
@@ -212,46 +216,19 @@ fn delayed_binding_proxy() {
             }
             thread::sleep(Duration::from_millis(3000)); // wait for clients to be started
 
-            // now timer events in the wheel should have timed out, trigger another tick of the timer_wheel:
-            match TcpStream::connect(&SocketAddr::from(proxy_addr)) {
-                Ok(mut stream) => {
-                    debug!("******** final TCP connect to proxy successful ********");
-                    stream.set_write_timeout(Some(Duration::from_millis(200))).unwrap();
-                    stream.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
-                    match stream.write(&format!("{} stars", 1).to_string().into_bytes()) {
-                        Ok(_) => {
-                            let mut buf = [0u8; 256];
-                            match stream.read(&mut buf[..]) {
-                                Ok(_) => info!("we received {}", String::from_utf8(buf.to_vec()).unwrap()),
-                                _ => {
-                                    debug!("timeout while waiting for answer");
-                                }
-                            };
-                        }
-                        _ => {
-                            panic!("error when writing to test connection");
-                        }
-                    }
-                }
-                _ => {
-                    panic!("3-way handshake with proxy failed");
-                }
-            }
-            thread::sleep(Duration::from_millis(500)); // Sleep for a bit
-
-            info!("terminating ProxyEngine ...");
-            mtx.send(MessageFrom::Exit).unwrap();
+            mtx.send(MessageFrom::FetchCRecords).unwrap();
 
             match reply_mrx.recv_timeout(Duration::from_millis(5000)) {
-                Ok(MessageTo::ConRecords(con_records)) => {
-                    assert_eq!(con_records.len(), proxy_config.test_size.unwrap() * CLIENT_THREADS +1);
+                Ok(MessageTo::CRecords(_pipeline_id, con_records_c, _con_records_s)) => {
+                    assert_eq!(con_records_c.len(), configuration.test_size.unwrap() * CLIENT_THREADS);
                     let mut timeouts =0;
-                    for (_p, c) in &con_records {
+                    for (_p, c) in &con_records_c {
+                        debug!("{}", c);
                         if c.get_release_cause() == ReleaseCause::Timeout {
                             timeouts +=1;
                         }
                     }
-                    assert_eq!(timeouts, proxy_config.test_size.unwrap() * CLIENT_THREADS);
+                    assert_eq!(timeouts, configuration.test_size.unwrap() * CLIENT_THREADS);
                 }
                 Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
                 Err(e) => {
@@ -259,6 +236,11 @@ fn delayed_binding_proxy() {
                 }
             }
 
+
+            mtx.send(MessageFrom::Exit).unwrap();
+            thread::sleep(Duration::from_millis(2000));
+
+            info!("terminating ProxyEngine ...");
             std::process::exit(0);
         }
         Err(ref e) => {
