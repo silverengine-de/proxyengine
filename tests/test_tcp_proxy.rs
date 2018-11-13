@@ -14,8 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::env;
 use std::time::Duration;
 use std::thread;
-use std::io::Read;
-use std::io::Write;
+use std::io::{Read, BufWriter, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc::channel;
 use std::sync::mpsc::RecvTimeoutError;
@@ -24,6 +23,7 @@ use std::fs::File;
 use std::str::FromStr;
 use std::collections::HashMap;
 use std::vec::Vec;
+use std::error::Error;
 
 use ipnet::Ipv4Net;
 use separator::Separatable;
@@ -47,6 +47,7 @@ use tcp_proxy::L234Data;
 use tcp_proxy::{MessageFrom, MessageTo};
 use tcp_proxy::spawn_recv_thread;
 use tcp_proxy::TcpState;
+
 
 #[test]
 fn delayed_binding_proxy() {
@@ -325,10 +326,16 @@ fn delayed_binding_proxy() {
                 }
             }
             info!("completed connections c/s: {}/{}", completed_count_c, completed_count_s );
-            //assert_eq!(completed_count_s, configuration.test_size.unwrap());
+
+            let mut file = match File::create("c_records.txt") {
+                Err(why) => panic!("couldn't create c_records.txt: {}",
+                                   why.description()),
+                Ok(file) => file,
+            };
+            let mut f = BufWriter::new(file);
 
             for (p, (c_records_c, mut c_records_s)) in con_records {
-                info!("Pipeline {}:", p);
+                f.write_all(format!("Pipeline {}:", p).as_bytes()).expect("cannot write c_records");
                 if c_records_c.len() > 0 {
                     let mut completed_count = 0;
                     let mut min = c_records_c.iter().last().unwrap().1;
@@ -336,8 +343,11 @@ fn delayed_binding_proxy() {
                     c_records_c.iter().enumerate().for_each(|(i, (_, c))| {
                         let uuid=c.uuid.as_ref().unwrap();
                         let c_server = c_records_s.remove(uuid);
-                        info!("{:6}: {}", i, c);
-                        if c_server.is_some() { info!("        {}", c_server.unwrap()); }
+                        let line = format!("{:6}: {}\n", i, c);
+                        f.write_all(line.as_bytes()).expect("cannot write c_records");
+                        if c_server.is_some() {
+                            f.write_all(format!("        {}", c_server.unwrap()).as_bytes()).expect("cannot write c_records");
+                        }
                         if (c.get_release_cause() == ReleaseCause::PassiveClose || c.get_release_cause() == ReleaseCause::ActiveClose) && c.states().last().unwrap() == &TcpState::Closed {
                             completed_count += 1
                         }

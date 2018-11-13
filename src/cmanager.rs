@@ -192,7 +192,7 @@ impl ConnectionManager {
             con_records_s: HashMap::with_capacity(MAX_CONNECTIONS),
             sock2port: HashMap::<SocketAddrV4, u16, FnvHash>::with_hasher(Default::default()),
             port2con: vec![Connection::new(); (!port_mask + 1) as usize],
-            free_ports: (tcp_port_base..max_tcp_port).collect(),
+            free_ports: ((if tcp_port_base==0 { 1 } else { tcp_port_base }) ..max_tcp_port).collect(), // port 0 is reserved and not usable for us
             pci,
             tcp_port_base,
             ip,
