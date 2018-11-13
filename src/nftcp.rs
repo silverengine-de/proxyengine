@@ -208,12 +208,14 @@ pub fn setup_forwarder<F1, F2>(
             }
 
             impl<'a> HeaderState<'a> {
+                #[inline]
                 fn set_server_socket(&mut self, ip: u32, port: u16) {
                     self.ip.set_dst(ip);
                     self.tcp.set_dst_port(port);
                 }
             }
 
+            #[inline]
             fn do_ttl(h: &mut HeaderState) {
                 let ttl = h.ip.ttl();
                 if ttl >= 1 {
@@ -222,6 +224,7 @@ pub fn setup_forwarder<F1, F2>(
                 h.ip.update_checksum();
             }
 
+            #[inline]
             fn make_reply_packet(h: &mut HeaderState) {
                 let smac = h.mac.src;
                 let dmac = h.mac.dst;
@@ -242,6 +245,7 @@ pub fn setup_forwarder<F1, F2>(
 
             // remove tcp options for SYN and SYN-ACK,
             // pre-requisite: no payload exists, because any payload is not shifted up
+            #[inline]
             fn remove_tcp_options<M: Sized + Send>(p: &mut Packet<TcpHeader, M>, h: &mut HeaderState) {
                 let old_offset = h.tcp.offset() as u16;
                 if old_offset > 20 {
@@ -255,6 +259,8 @@ pub fn setup_forwarder<F1, F2>(
                 }
             }
 
+
+            #[inline]
             fn client_syn_received<M: Sized + Send>(p: &mut Packet<TcpHeader, M>, c: &mut Connection, h: &mut HeaderState) {
                 c.con_rec_c.push_state(TcpState::SynSent);
                 c.client_mac = h.mac.clone();
@@ -269,6 +275,7 @@ pub fn setup_forwarder<F1, F2>(
                 // debug!("checksum recalc = {:X}",p.get_header().checksum());
             }
 
+            #[inline]
             fn set_proxy2server_headers(c: &mut Connection, h: &mut HeaderState, pd: &L234Data, ip_src: u32) {
                 if c.server.is_none() {
                     error!("no server set: {}", c);
@@ -291,11 +298,16 @@ pub fn setup_forwarder<F1, F2>(
             ) where
                 F: Fn(&mut Connection, &mut [u8], usize),
             {
-                let tailroom = p.get_tailroom();
-                f_process_payload(c, p.get_mut_payload(), tailroom);
                 let ip_client = h.ip.src();
                 let old_ip_dst = h.ip.dst();
                 let port_client = h.tcp.src_port();
+
+                if p.payload_size() > 0 {
+                    let tailroom = p.get_tailroom();
+                    f_process_payload(c, p.get_mut_payload(), tailroom);
+                    if port_client == 49183 { info!("client_to_server: payload size {}", p.payload_size()) };
+                }
+
                 set_proxy2server_headers(c, h, pd, ip_src);
                 h.tcp.update_checksum_incremental(port_client, c.port());
                 h.tcp.update_checksum_incremental(pd.port, c.server.as_ref().unwrap().port);
