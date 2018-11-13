@@ -18,6 +18,8 @@ use eui48::MacAddress;
 use ipnet::Ipv4Net;
 use uuid::Uuid;
 use rand;
+use separator::Separatable;
+
 use cmanager::{ Connection, CKey, ConnectionManager };
 use netfcts::timer_wheel::TimerWheel;
 use EngineConfig;
@@ -316,6 +318,7 @@ pub fn setup_forwarder<F1, F2>(
                 }
                 h.tcp.set_ack_num(newackn);
                 h.tcp.update_checksum_incremental(!finalize_checksum(oldackn), !finalize_checksum(newackn));
+                if port_client == 49183 { info!("client_to_server: {}", utils::rdtsc_unsafe().separated_string()) }
                 //debug!("translated c->s: { }, L4: { }", p, p.get_header());
             }
 
@@ -358,6 +361,7 @@ pub fn setup_forwarder<F1, F2>(
                 }
                 h.tcp.set_seq_num(newseqn);
                 h.tcp.update_checksum_incremental(!finalize_checksum(oldseqn), !finalize_checksum(newseqn));
+                if c.get_client_sock().unwrap().port() == 49183 { info!("server_to_client: {}", utils::rdtsc_unsafe().separated_string()) }
                 //debug!("translated s->c: {}", p);
             }
 
@@ -570,6 +574,7 @@ pub fn setup_forwarder<F1, F2>(
                                 if hs.tcp.fin_flag() {
                                     c.con_rec_c.push_state(TcpState::LastAck);
                                     counter_c[TcpStatistics::RecvFinAck] += 1;
+                                    if hs_flow.src_port == 49183 { info!("proxy client, Recv FinAck {}", utils::rdtsc_unsafe().separated_string()) }
                                 } else { counter_c[TcpStatistics::RecvAck] += 1; }
                                 trace!("{} transition to client/server state {:?}/{:?}", thread_id, c.con_rec_c.states(), c.con_rec_s.states());
                             } else if old_s_state == TcpState::LastAck && hs.tcp.ack_flag() {
@@ -590,6 +595,7 @@ pub fn setup_forwarder<F1, F2>(
                                 if old_s_state >= TcpState::FinWait1 {
                                     // we got a FIN as a receipt to a sent FIN (server closed connection)
                                     trace!("{} received FIN-reply from client {:?}", thread_id, hs_flow.src_socket_addr());
+                                    if hs_flow.src_port == 49183 { info!("proxy client, Recv Fin {}", utils::rdtsc_unsafe().separated_string()) }
                                     c.con_rec_c.push_state(TcpState::LastAck);
                                     counter_c[TcpStatistics::RecvFinAck] += 1;
                                 } else {
@@ -684,6 +690,7 @@ pub fn setup_forwarder<F1, F2>(
                                             c.get_client_sock().unwrap().port(),
                                             c.con_rec_s.states(),
                                         );
+                                        if c.get_client_sock().unwrap().port() == 49183 { info!("proxy server, Recv Fin {}", utils::rdtsc_unsafe().separated_string()) }
                                         c.con_rec_s.push_state(TcpState::FinWait1);
                                         c.con_rec_c.released(ReleaseCause::PassiveClose);
                                         c.con_rec_s.released(ReleaseCause::ActiveClose);
