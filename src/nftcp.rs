@@ -33,7 +33,7 @@ use Timeouts;
 use is_kni_core;
 
 const MIN_FRAME_SIZE: usize = 60; // without fcs
-
+const OBSERVE_PORT: u16 = 49152;
 
 pub fn setup_forwarder<F1, F2>(
     core: i32,
@@ -302,10 +302,10 @@ pub fn setup_forwarder<F1, F2>(
                 let old_ip_dst = h.ip.dst();
                 let port_client = h.tcp.src_port();
 
-                if p.payload_size() > 0 {
+                if tcpip_payload_size(p) > 0 {
                     let tailroom = p.get_tailroom();
                     f_process_payload(c, p.get_mut_payload(), tailroom);
-                    if port_client == 49183 { info!("client_to_server: payload size {}", p.payload_size()) };
+                    if port_client == OBSERVE_PORT { info!("client_to_server: payload size {}", p.payload_size()) };
                 }
 
                 set_proxy2server_headers(c, h, pd, ip_src);
@@ -330,7 +330,7 @@ pub fn setup_forwarder<F1, F2>(
                 }
                 h.tcp.set_ack_num(newackn);
                 h.tcp.update_checksum_incremental(!finalize_checksum(oldackn), !finalize_checksum(newackn));
-                if port_client == 49183 { info!("client_to_server: {}", utils::rdtsc_unsafe().separated_string()) }
+                if port_client == OBSERVE_PORT { info!("client_to_server: {}", utils::rdtsc_unsafe().separated_string()) }
                 //debug!("translated c->s: { }, L4: { }", p, p.get_header());
             }
 
@@ -341,6 +341,7 @@ pub fn setup_forwarder<F1, F2>(
                 h: &mut HeaderState,
                 pd: &L234Data,
             ) {
+                if c.get_client_sock().unwrap().port() == OBSERVE_PORT { info!("server_to_client pos 0: {}", utils::rdtsc_unsafe().separated_string()) }
                 // this is the s->c part of the stable two-way connection state
                 // translate packets and forward to client
                 h.mac.set_dmac(&c.client_mac.src);
@@ -358,6 +359,7 @@ pub fn setup_forwarder<F1, F2>(
                     !finalize_checksum(ip_server),
                     !finalize_checksum(pd.ip)
                 );
+                if c.get_client_sock().unwrap().port() == OBSERVE_PORT { info!("server_to_client pos 1: {}", utils::rdtsc_unsafe().separated_string()) }
                 h.tcp.update_checksum_incremental(
                     !finalize_checksum(old_dest_ip),
                     !finalize_checksum(u32::from(*c.get_client_sock().unwrap().ip()))
@@ -373,7 +375,7 @@ pub fn setup_forwarder<F1, F2>(
                 }
                 h.tcp.set_seq_num(newseqn);
                 h.tcp.update_checksum_incremental(!finalize_checksum(oldseqn), !finalize_checksum(newseqn));
-                if c.get_client_sock().unwrap().port() == 49183 { info!("server_to_client: {}", utils::rdtsc_unsafe().separated_string()) }
+                if c.get_client_sock().unwrap().port() == OBSERVE_PORT { info!("server_to_client pos 2: {}", utils::rdtsc_unsafe().separated_string()) }
                 //debug!("translated s->c: {}", p);
             }
 
@@ -586,7 +588,7 @@ pub fn setup_forwarder<F1, F2>(
                                 if hs.tcp.fin_flag() {
                                     c.con_rec_c.push_state(TcpState::LastAck);
                                     counter_c[TcpStatistics::RecvFinAck] += 1;
-                                    if hs_flow.src_port == 49183 { info!("proxy client, Recv FinAck {}", utils::rdtsc_unsafe().separated_string()) }
+                                    if hs_flow.src_port == OBSERVE_PORT { info!("proxy client, Recv FinAck {}", utils::rdtsc_unsafe().separated_string()) }
                                 } else { counter_c[TcpStatistics::RecvAck] += 1; }
                                 trace!("{} transition to client/server state {:?}/{:?}", thread_id, c.con_rec_c.states(), c.con_rec_s.states());
                             } else if old_s_state == TcpState::LastAck && hs.tcp.ack_flag() {
@@ -607,7 +609,7 @@ pub fn setup_forwarder<F1, F2>(
                                 if old_s_state >= TcpState::FinWait1 {
                                     // we got a FIN as a receipt to a sent FIN (server closed connection)
                                     trace!("{} received FIN-reply from client {:?}", thread_id, hs_flow.src_socket_addr());
-                                    if hs_flow.src_port == 49183 { info!("proxy client, Recv Fin {}", utils::rdtsc_unsafe().separated_string()) }
+                                    if hs_flow.src_port == OBSERVE_PORT { info!("proxy client, Recv Fin {}", utils::rdtsc_unsafe().separated_string()) }
                                     c.con_rec_c.push_state(TcpState::LastAck);
                                     counter_c[TcpStatistics::RecvFinAck] += 1;
                                 } else {
@@ -702,7 +704,7 @@ pub fn setup_forwarder<F1, F2>(
                                             c.get_client_sock().unwrap().port(),
                                             c.con_rec_s.states(),
                                         );
-                                        if c.get_client_sock().unwrap().port() == 49183 { info!("proxy server, Recv Fin {}", utils::rdtsc_unsafe().separated_string()) }
+                                        if c.get_client_sock().unwrap().port() == OBSERVE_PORT { info!("Recv Fin from server {}", utils::rdtsc_unsafe().separated_string()) }
                                         c.con_rec_s.push_state(TcpState::FinWait1);
                                         c.con_rec_c.released(ReleaseCause::PassiveClose);
                                         c.con_rec_s.released(ReleaseCause::ActiveClose);

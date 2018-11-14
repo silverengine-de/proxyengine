@@ -316,7 +316,11 @@ pub fn main() {
                     let mut completed_count = 0;
                     let mut min = c_records_c.iter().last().unwrap().1;
                     let mut max = min;
-                    c_records_c.iter().enumerate().for_each(|(i, (_, c))| {
+
+                    let mut vec_client: Vec<_> = c_records_c.iter().collect();
+                    vec_client.sort_by( |a, b| a.1.port.cmp(&b.1.port));
+
+                    vec_client.iter().enumerate().for_each(|(i, (_, c))| {
                         let uuid=c.uuid.as_ref().unwrap();
                         let c_server = c_records_s.remove(uuid);
                         let line = format!("{:6}: {}\n", i, c);
