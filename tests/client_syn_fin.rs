@@ -41,7 +41,7 @@ use tcp_proxy::{read_config};
 use tcp_proxy::get_mac_from_ifname;
 use tcp_proxy::Container;
 use tcp_proxy::L234Data;
-use tcp_proxy::{MessageFrom, MessageTo};
+use netfcts::comm::{MessageFrom, MessageTo};
 use tcp_proxy::spawn_recv_thread;
 use tcp_proxy::setup_pipelines;
 use tcp_proxy::TcpState;
@@ -257,9 +257,9 @@ fn delayed_binding_proxy() {
                 info!("Pipeline {}:", p);
                 if c_records_c.len() > 0 {
                     let mut completed_count = 0;
-                    let mut min = c_records_c.iter().last().unwrap().1;
+                    let mut min = c_records_c.iter().last().unwrap();
                     let mut max = min;
-                    c_records_c.iter().enumerate().for_each(|(i, (_, c))| {
+                    c_records_c.iter().enumerate().for_each(|(i, c)| {
                         info!("{:6}: {}", i, c);
                         if (c.get_release_cause() == ReleaseCause::PassiveClose || c.get_release_cause() == ReleaseCause::ActiveClose) && c.states().last().unwrap() == &TcpState::Closed {
                             completed_count += 1
@@ -277,7 +277,7 @@ fn delayed_binding_proxy() {
 
             let mut completed_count_c = 0;
             for (_p, (con_recs, _)) in &con_records {
-                for c in con_recs.values() {
+                for c in con_recs {
                     if c.get_release_cause() == ReleaseCause::ActiveClose
                         && c.last_state() == &TcpState::Closed
                         {
@@ -290,7 +290,7 @@ fn delayed_binding_proxy() {
 
             let mut completed_count_s = 0;
             for (_p, (_, con_recs)) in &con_records{
-                for c in con_recs.values() {
+                for c in con_recs {
                     if c.get_release_cause() == ReleaseCause::PassiveClose
                         && c.last_state() == &TcpState::Closed
                         {

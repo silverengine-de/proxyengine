@@ -44,6 +44,7 @@ use e2d2::interface::{PortQueue, PmdPort, FlowDirector};
 use errors::*;
 use nftcp::setup_forwarder;
 use netfcts::{is_kni_core, setup_kni, FlowSteeringMode};
+use netfcts::comm::{MessageFrom, MessageTo, PipelineId};
 
 use std::fs::File;
 use std::io::Read;
@@ -329,42 +330,6 @@ pub fn setup_pipelines<F1, F2>(
         flowdirector_map,
         tx,
     );
-}
-
-#[derive(Clone, PartialEq, Eq, Hash, Default)]
-pub struct PipelineId {
-    pub core: u16,
-    pub port_id: u16,
-    pub rxq: u16,
-}
-
-impl fmt::Display for PipelineId {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "<c{}, p{}, rx{}>", self.core, self.port_id, self.rxq)
-    }
-}
-
-pub enum MessageFrom {
-    Channel(PipelineId, Sender<MessageTo>),
-    Established(PipelineId, ConRecord),
-    GenTimeStamp(PipelineId, &'static str, usize, u64, u64),
-    StartEngine(Sender<MessageTo>),
-    Task(PipelineId, Uuid, TaskType),
-    PrintPerformance(Vec<i32>), // performance of tasks on cores selected by indices
-    Counter(PipelineId, TcpCounter, TcpCounter),
-    CRecords(PipelineId, HashMap<Uuid, ConRecord>, HashMap<Uuid, ConRecord>), // pipeline_id, client, server
-    FetchCounter, // triggers fetching of counters from pipelines
-    FetchCRecords,
-    Exit, // exit recv thread
-}
-
-pub enum MessageTo {
-    FetchCounter, // fetch counters from pipeline
-    FetchCRecords,
-    Counter(PipelineId, TcpCounter, TcpCounter),
-    CRecords(PipelineId, HashMap<Uuid, ConRecord>, HashMap<Uuid, ConRecord>),
-    StartGenerator,
-    Exit, // exit recv thread
 }
 
 

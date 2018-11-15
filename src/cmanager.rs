@@ -75,6 +75,7 @@ impl Connection {
         self.c2s_inserted_bytes = 0;
         self.con_rec_c.init(TcpRole::Client, proxy_sport, Some(client_sock));
         self.con_rec_s.init(TcpRole::Server, proxy_sport, Some(client_sock));
+        self.con_rec_s.uuid = self.con_rec_c.uuid.clone();
     }
 
     fn new() -> Connection {
@@ -166,8 +167,8 @@ impl Clone for Connection {
 pub static GLOBAL_MANAGER_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
 
 pub struct ConnectionManager {
-    con_records_c: HashMap<Uuid, ConRecord>,
-    con_records_s: HashMap<Uuid, ConRecord>,
+    con_records_c: Vec<ConRecord>,
+    con_records_s: Vec<ConRecord>,
     sock2port: HashMap<SocketAddrV4, u16, FnvHash>,
     free_ports: VecDeque<u16>,
     port2con: Vec<Connection>,
@@ -188,8 +189,8 @@ impl ConnectionManager {
         let port_mask = pci.port.get_tcp_dst_port_mask();
         let max_tcp_port = tcp_port_base + !port_mask;
         let mut cm = ConnectionManager {
-            con_records_c: HashMap::with_capacity(MAX_CONNECTIONS),
-            con_records_s: HashMap::with_capacity(MAX_CONNECTIONS),
+            con_records_c: Vec::with_capacity(MAX_CONNECTIONS),
+            con_records_s: Vec::with_capacity(MAX_CONNECTIONS),
             sock2port: HashMap::<SocketAddrV4, u16, FnvHash>::with_hasher(Default::default()),
             port2con: vec![Connection::new(); (!port_mask + 1) as usize],
             free_ports: ((if tcp_port_base==0 { 1 } else { tcp_port_base }) ..max_tcp_port).collect(), // port 0 is reserved and not usable for us
@@ -301,8 +302,8 @@ impl ConnectionManager {
         let c = &mut self.port2con[(port - self.tcp_port_base) as usize];
         // only if it is in use, i.e. it has been not released already
         if c.in_use() {
-            self.con_records_c.insert(c.get_uuid().unwrap(), c.con_rec_c.clone());
-            self.con_records_s.insert(c.get_uuid().unwrap(), c.con_rec_s.clone());
+            self.con_records_c.push( c.con_rec_c.clone());
+            self.con_records_s.push( c.con_rec_s.clone());
             self.free_ports.push_back(port);
             assert_eq!(port, c.port());
             {
@@ -357,14 +358,14 @@ impl ConnectionManager {
         let c_records = &mut self.con_records_c;
         self.port2con.iter().for_each(|c| {
             if c.port() != 0 {
-                c_records.insert(c.get_uuid().unwrap(), c.con_rec_c.clone());
+                c_records.push( c.con_rec_c.clone());
             }
         });
     }
 
-    pub fn fetch_c_records(&mut self) -> (HashMap<Uuid, ConRecord>, HashMap<Uuid, ConRecord>) {
-        (mem::replace(&mut self.con_records_c, HashMap::with_capacity(MAX_CONNECTIONS)), // we are "moving" the con_records out, and replace it with a new one
-         mem::replace(&mut self.con_records_s, HashMap::with_capacity(MAX_CONNECTIONS)))
+    pub fn fetch_c_records(&mut self) -> (Vec<ConRecord>, Vec<ConRecord>) {
+        (mem::replace(&mut self.con_records_c, Vec::with_capacity(MAX_CONNECTIONS)), // we are "moving" the con_records out, and replace it with a new one
+         mem::replace(&mut self.con_records_s, Vec::with_capacity(MAX_CONNECTIONS)))
     }
 
     #[allow(dead_code)]

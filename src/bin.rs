@@ -40,13 +40,14 @@ use separator::Separatable;
 
 use netfcts::initialize_flowdirector;
 use netfcts::tcp_common::{ReleaseCause};
+use netfcts::comm::{MessageFrom, MessageTo};
+
 
 use tcp_proxy::{get_mac_from_ifname, read_config, setup_pipelines};
 use tcp_proxy::Connection;
 use tcp_proxy::Container;
 use tcp_proxy::errors::*;
 use tcp_proxy::L234Data;
-use tcp_proxy::{MessageFrom, MessageTo};
 use tcp_proxy::spawn_recv_thread;
 use tcp_proxy::TcpState;
 
@@ -281,7 +282,7 @@ pub fn main() {
 
             let mut completed_count_c = 0;
             for (_p, (con_recs, _)) in &con_records {
-                for c in con_recs.values() {
+                for c in con_recs {
                     if (c.get_release_cause() == ReleaseCause::PassiveClose || c.get_release_cause() == ReleaseCause::ActiveClose)
                         && c.last_state() == &TcpState::Closed
                         {
@@ -292,7 +293,7 @@ pub fn main() {
 
             let mut completed_count_s = 0;
             for (_p, (_, con_recs)) in &con_records{
-                for c in con_recs.values() {
+                for c in con_recs {
                     if (c.get_release_cause() == ReleaseCause::PassiveClose || c.get_release_cause() == ReleaseCause::ActiveClose)
                         && c.last_state() == &TcpState::Closed
                         {
@@ -309,28 +310,31 @@ pub fn main() {
             };
             let mut f = BufWriter::new(file);
 
-            for (p, (c_records_c, mut c_records_s)) in con_records {
+            for (p, (mut c_records_c, mut c_records_s)) in con_records {
                 info!("Pipeline {}:", p);
                 f.write_all(format!("Pipeline {}:\n", p).as_bytes()).expect("cannot write c_records");
+                // make HashMap with key uuid
+                let mut by_uuid = HashMap::with_capacity(c_records_s.len());
+                for c in c_records_s { by_uuid.insert(c.uuid.unwrap(), c.clone()); }
+
+
                 if c_records_c.len() > 0 {
                     let mut completed_count = 0;
-                    let mut min = c_records_c.iter().last().unwrap().1;
-                    let mut max = min;
+                    let mut min = c_records_c.iter().last().unwrap().clone();
+                    let mut max = min.clone();
+                    c_records_c.sort_by( |a, b| a.sock.unwrap().port().cmp(&b.sock.unwrap().port()));
 
-                    let mut vec_client: Vec<_> = c_records_c.iter().collect();
-                    vec_client.sort_by( |a, b| a.1.port.cmp(&b.1.port));
-
-                    vec_client.iter().enumerate().for_each(|(i, (_, c))| {
+                    c_records_c.iter().enumerate().for_each(|(i, c)| {
                         let uuid=c.uuid.as_ref().unwrap();
-                        let c_server = c_records_s.remove(uuid);
+                        let c_server = by_uuid.remove(uuid);
                         let line = format!("{:6}: {}\n", i, c);
                         f.write_all(line.as_bytes()).expect("cannot write c_records");
                         f.write_all(format!("        {}\n", c_server.unwrap()).as_bytes()).expect("cannot write c_records");
                         if (c.get_release_cause() == ReleaseCause::PassiveClose || c.get_release_cause() == ReleaseCause::ActiveClose) && c.states().last().unwrap() == &TcpState::Closed {
                             completed_count += 1
                         }
-                        if c.get_first_stamp().unwrap_or(u64::max_value()) < min.get_first_stamp().unwrap_or(u64::max_value()) { min = c }
-                        if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) { max = c }
+                        if c.get_first_stamp().unwrap_or(u64::max_value()) < min.get_first_stamp().unwrap_or(u64::max_value()) { min = c.clone() }
+                        if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) { max = c.clone() }
                         if i == (c_records_c.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some() {
                             let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
                             info!("total used cycles= {}, per connection = {}", total.separated_string(), (total / (i as u64 + 1)).separated_string());
@@ -339,6 +343,7 @@ pub fn main() {
                 }
             }
 
+            f.flush().expect("cannot flush BufWriter");
             mtx.send(MessageFrom::Exit).unwrap();
 
             info!("terminating ProxyEngine ...");

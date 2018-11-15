@@ -31,6 +31,7 @@ use e2d2::allocators::CacheAligned;
 
 use netfcts::initialize_flowdirector;
 use netfcts::tcp_common::ReleaseCause;
+use netfcts::comm::{ MessageFrom, MessageTo };
 
 use tcp_proxy::Connection;
 use tcp_proxy::{read_config, };
@@ -38,7 +39,6 @@ use tcp_proxy::get_mac_from_ifname;
 use tcp_proxy::setup_pipelines;
 use tcp_proxy::Container;
 use tcp_proxy::L234Data;
-use tcp_proxy::{ MessageFrom, MessageTo };
 use tcp_proxy::spawn_recv_thread;
 
 #[test]
@@ -222,7 +222,7 @@ fn delayed_binding_proxy() {
                 Ok(MessageTo::CRecords(_pipeline_id, con_records_c, _con_records_s)) => {
                     assert_eq!(con_records_c.len(), configuration.test_size.unwrap() * CLIENT_THREADS);
                     let mut timeouts =0;
-                    for (_p, c) in &con_records_c {
+                    for c in &con_records_c {
                         debug!("{}", c);
                         if c.get_release_cause() == ReleaseCause::Timeout {
                             timeouts +=1;
