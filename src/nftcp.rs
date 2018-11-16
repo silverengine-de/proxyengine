@@ -166,19 +166,20 @@ pub fn setup_forwarder<F1, F2>(
         uuid_l2groupby_clone,
     );
 
+    let pipeline_id_clone = pipeline_id.clone();
     let mut counter_c = TcpCounter::new();
     let mut counter_s = TcpCounter::new();
 
     // set up the generator producing timer tick packets with our private EtherType
     let (producer_timerticks, consumer_timerticks) = new_mpsc_queue_pair();
-    //TODO calculate tick_length
-    let tick_generator = tasks::TickGenerator::new(producer_timerticks, &me, 22700);
+    let tick_generator = tasks::TickGenerator::new(producer_timerticks, &me, system_data.cpu_clock / 100); // 10 ms
     assert!(wheel.resolution() > tick_generator.tick_length());
     let wheel_tick_reduction_factor = wheel.resolution() / tick_generator.tick_length();
     let mut ticks = 0;
-    tasks::install_task(sched, "TickGenerator", tick_generator);
+    let uuid_tick_generator = tasks::install_task(sched, "TickGenerator", tick_generator);
+    tx.send(MessageFrom::Task(pipeline_id.clone(), uuid_tick_generator, TaskType::TickGenerator))
+        .unwrap();
 
-    let pipeline_id_clone = pipeline_id.clone();
 
     let l2_input_stream = merge_auto(
         vec![consumer_timerticks.compose(), l2groups.get_group(1).unwrap().compose()],
@@ -189,7 +190,6 @@ pub fn setup_forwarder<F1, F2>(
     // group 1 -> send to PCI
     // group 2 -> send to KNI
     let uuid_l4groupby = Uuid::new_v4();
-    let uuid_l4groupby_clone = uuid_l4groupby.clone();
     // process TCP traffic addressed to Proxy
     let mut l4groups = l2_input_stream.parse::<MacHeader>().parse::<IpHeader>().parse::<TcpHeader>().group_by(
         3,
@@ -758,7 +758,7 @@ pub fn setup_forwarder<F1, F2>(
             group_index
         },
         sched,
-        uuid_l4groupby_clone,
+        uuid_l4groupby,
     );
 
     let l2kniflow = l2groups.get_group(0).unwrap().compose();
