@@ -14,11 +14,9 @@ use netfcts::timer_wheel::{TimerWheel};
 use netfcts::tcp_common::*;
 use netfcts::ConRecord;
 
-
 use fnv::FnvHasher;
 
 type FnvHash = BuildHasherDefault<FnvHasher>;
-
 
 #[derive(Debug, Clone, Copy, Eq, Hash)]
 pub enum CKey {
@@ -133,10 +131,14 @@ impl Connection {
     }
 
     #[inline]
-    pub fn set_uuid(&mut self, uuid: Option<Uuid>)-> Option<Uuid> { mem::replace(&mut self.con_rec_c.uuid, uuid) }
+    pub fn set_uuid(&mut self, uuid: Option<Uuid>) -> Option<Uuid> {
+        mem::replace(&mut self.con_rec_c.uuid, uuid)
+    }
 
     #[inline]
-    pub fn get_uuid(&self)-> &Option<Uuid> { &self.con_rec_c.uuid }
+    pub fn get_uuid(&self) -> &Option<Uuid> {
+        &self.con_rec_c.uuid
+    }
 
     #[inline]
     pub fn make_uuid(&mut self) -> &Uuid {
@@ -174,18 +176,15 @@ pub struct ConnectionManager {
     port2con: Vec<Connection>,
     pci: CacheAligned<PortQueue>, // the PortQueue for which connections are managed
     tcp_port_base: u16,
-    ip: u32,    // ip address to use for connections of this manager
+    ip: u32, // ip address to use for connections of this manager
 }
 
-const MAX_CONNECTIONS:usize = 0xFFFF as usize;
+const MAX_CONNECTIONS: usize = 0xFFFF as usize;
 
 impl ConnectionManager {
-    pub fn new(
-        pci: CacheAligned<PortQueue>,
-        l4flow: &L4Flow,
-    ) -> ConnectionManager {
+    pub fn new(pci: CacheAligned<PortQueue>, l4flow: &L4Flow) -> ConnectionManager {
         let old_manager_count: u16 = GLOBAL_MANAGER_COUNT.fetch_add(1, Ordering::SeqCst) as u16;
-        let (ip, tcp_port_base)=(l4flow.ip, l4flow.port);
+        let (ip, tcp_port_base) = (l4flow.ip, l4flow.port);
         let port_mask = pci.port.get_tcp_dst_port_mask();
         let max_tcp_port = tcp_port_base + !port_mask;
         let mut cm = ConnectionManager {
@@ -193,7 +192,7 @@ impl ConnectionManager {
             con_records_s: Vec::with_capacity(MAX_CONNECTIONS),
             sock2port: HashMap::<SocketAddrV4, u16, FnvHash>::with_hasher(Default::default()),
             port2con: vec![Connection::new(); (!port_mask + 1) as usize],
-            free_ports: ((if tcp_port_base==0 { 1 } else { tcp_port_base }) ..max_tcp_port).collect(), // port 0 is reserved and not usable for us
+            free_ports: ((if tcp_port_base == 0 { 1 } else { tcp_port_base })..max_tcp_port).collect(), // port 0 is reserved and not usable for us
             pci,
             tcp_port_base,
             ip,
@@ -260,7 +259,6 @@ impl ConnectionManager {
         }
     }
 
-
     pub fn get_mut_or_insert(&mut self, key: CKey) -> Option<&mut Connection> {
         match key {
             CKey::Port(p) => {
@@ -286,7 +284,13 @@ impl ConnectionManager {
                         let cc = &mut self.port2con[(port - self.tcp_port_base) as usize];
                         assert_eq!(cc.port(), 0);
                         cc.initialize(&s, port);
-                        debug!("rxq={}: tcp flow for {} created on {}:{:?}", self.pci.rxq(), s, Ipv4Addr::from(self.ip), port);
+                        debug!(
+                            "rxq={}: tcp flow for {} created on {}:{:?}",
+                            self.pci.rxq(),
+                            s,
+                            Ipv4Addr::from(self.ip),
+                            port
+                        );
                     }
                     self.sock2port.insert(s, port);
                     Some(self.get_mut_con(&port))
@@ -302,8 +306,8 @@ impl ConnectionManager {
         let c = &mut self.port2con[(port - self.tcp_port_base) as usize];
         // only if it is in use, i.e. it has been not released already
         if c.in_use() {
-            self.con_records_c.push( c.con_rec_c.clone());
-            self.con_records_s.push( c.con_rec_s.clone());
+            self.con_records_c.push(c.con_rec_c.clone());
+            self.con_records_s.push(c.con_rec_s.clone());
             self.free_ports.push_back(port);
             assert_eq!(port, c.port());
             {
@@ -314,7 +318,7 @@ impl ConnectionManager {
                 }
             }
             c.set_port(0u16); // this indicates an unused connection,
-                                // we keep unused connection in port2con table
+                              // we keep unused connection in port2con table
         }
     }
 
@@ -352,20 +356,21 @@ impl ConnectionManager {
         self.release_port(port);
     }
 
-
     // pushes all uncompleted connections to the connection record store
     pub fn record_uncompleted(&mut self) {
         let c_records = &mut self.con_records_c;
         self.port2con.iter().for_each(|c| {
             if c.port() != 0 {
-                c_records.push( c.con_rec_c.clone());
+                c_records.push(c.con_rec_c.clone());
             }
         });
     }
 
     pub fn fetch_c_records(&mut self) -> (Vec<ConRecord>, Vec<ConRecord>) {
-        (mem::replace(&mut self.con_records_c, Vec::with_capacity(MAX_CONNECTIONS)), // we are "moving" the con_records out, and replace it with a new one
-         mem::replace(&mut self.con_records_s, Vec::with_capacity(MAX_CONNECTIONS)))
+        (
+            mem::replace(&mut self.con_records_c, Vec::with_capacity(MAX_CONNECTIONS)), // we are "moving" the con_records out, and replace it with a new one
+            mem::replace(&mut self.con_records_s, Vec::with_capacity(MAX_CONNECTIONS)),
+        )
     }
 
     #[allow(dead_code)]

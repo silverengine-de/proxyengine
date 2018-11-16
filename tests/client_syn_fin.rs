@@ -35,6 +35,7 @@ use e2d2::allocators::CacheAligned;
 
 use netfcts::initialize_flowdirector;
 use netfcts::tcp_common::ReleaseCause;
+use netfcts::system::SystemData;
 
 use tcp_proxy::Connection;
 use tcp_proxy::{read_config};
@@ -67,6 +68,8 @@ fn delayed_binding_proxy() {
         info!("dpdk log global level: {}", rte_log_get_global_level());
         info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
     }
+
+    let system_data = SystemData::detect();
 
     let configuration = read_config(toml_file.trim()).expect("cannot read config from toml file");
     if configuration.test_size.is_none() {
@@ -148,6 +151,7 @@ fn delayed_binding_proxy() {
             let (reply_mtx, reply_mrx) = channel::<MessageTo>();
 
             let proxy_config_cloned = configuration.clone();
+            let system_data_cloned = system_data.clone();
             let boxed_fss = Arc::new(f_select_server);
             let boxed_fpp = Arc::new(f_process_payload_c_s);
             let mtx_clone = mtx.clone();
@@ -163,6 +167,7 @@ fn delayed_binding_proxy() {
                         boxed_fpp.clone(),
                         flowdirector_map.clone(),
                         mtx_clone.clone(),
+                        system_data_cloned.clone(),
                     );
                 },
             ));

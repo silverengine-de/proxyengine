@@ -45,6 +45,7 @@ use errors::*;
 use nftcp::setup_forwarder;
 use netfcts::{is_kni_core, setup_kni, FlowSteeringMode};
 use netfcts::comm::{MessageFrom, MessageTo, PipelineId};
+use netfcts::system::SystemData;
 
 use std::fs::File;
 use std::io::Read;
@@ -60,9 +61,7 @@ use std::sync::mpsc::Receiver;
 use std::thread;
 use std::time::Duration;
 use std::sync::mpsc::RecvTimeoutError;
-use std::fmt;
 use std::str::FromStr;
-
 
 #[derive(Deserialize)]
 struct Config {
@@ -91,7 +90,6 @@ pub struct EngineConfig {
     pub timeouts: Option<Timeouts>,
     pub port: u16,
 }
-
 
 #[derive(Deserialize, Clone)]
 pub struct TargetConfig {
@@ -270,6 +268,7 @@ pub fn setup_pipelines<F1, F2>(
     f_process_payload_c_s: Arc<F2>,
     flowdirector_map: HashMap<i32, Arc<FlowDirector>>,
     tx: Sender<MessageFrom>,
+    system_data: SystemData,
 ) where
     F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
     F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + Sync + 'static,
@@ -329,10 +328,9 @@ pub fn setup_pipelines<F1, F2>(
         f_process_payload_c_s,
         flowdirector_map,
         tx,
+        system_data,
     );
 }
-
-
 
 pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksContext, configuration: Configuration) {
     /*
@@ -341,7 +339,7 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
     let _handle = thread::spawn(move || {
         let mut senders = HashMap::new();
         let mut tasks: Vec<Vec<(PipelineId, Uuid)>> = Vec::with_capacity(TaskType::NoTaskTypes as usize);
-        let mut start_tsc: HashMap<(PipelineId, &'static str), u64> = HashMap::new();   // start time stamps for tasks
+        let mut start_tsc: HashMap<(PipelineId, &'static str), u64> = HashMap::new(); // start time stamps for tasks
         let mut reply_to_main = None;
 
         for _t in 0..TaskType::NoTaskTypes as usize {
@@ -350,7 +348,7 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
         context.execute_schedulers();
         // set up kni
         debug!("Number of PMD ports: {}", PmdPort::num_pmd_ports());
-        for port in  context.ports.values() {
+        for port in context.ports.values() {
             debug!(
                 "port {}:{} -- mac_address= {}",
                 port.port_type(),
@@ -363,9 +361,12 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                     &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap(),
                     &configuration.engine.mac,
                     &configuration.engine.namespace,
-                    if configuration.flow_steering_mode() == FlowSteeringMode::Ip { context.active_cores.len() +1 } else { 1 },
+                    if configuration.flow_steering_mode() == FlowSteeringMode::Ip {
+                        context.active_cores.len() + 1
+                    } else {
+                        1
+                    },
                 );
-
             }
         }
 
@@ -488,25 +489,25 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                 .as_ref()
                 .unwrap()
                 .recv_timeout(Duration::from_millis(10))
-                {
-                    Ok(SchedulerReply::PerformanceData(core, map)) => {
-                        for d in map {
-                            info!(
-                                "{:2}: {:20} {:>15} count= {:12}, queue length= {}",
-                                core,
-                                (d.1).0,
-                                (d.1).1.separated_string(),
-                                (d.1).2.separated_string(),
-                                (d.1).3
-                            )
-                        }
-                    }
-                    Err(RecvTimeoutError::Timeout) => {}
-                    Err(e) => {
-                        error!("error receiving from SchedulerReply channel: {}", e);
-                        break;
+            {
+                Ok(SchedulerReply::PerformanceData(core, map)) => {
+                    for d in map {
+                        info!(
+                            "{:2}: {:20} {:>15} count= {:12}, queue length= {}",
+                            core,
+                            (d.1).0,
+                            (d.1).1.separated_string(),
+                            (d.1).2.separated_string(),
+                            (d.1).3
+                        )
                     }
                 }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(e) => {
+                    error!("error receiving from SchedulerReply channel: {}", e);
+                    break;
+                }
+            }
         }
         info!("exiting recv thread ...");
     });

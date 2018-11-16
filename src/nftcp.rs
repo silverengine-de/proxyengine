@@ -1,5 +1,5 @@
-use e2d2::operators::*;
-use e2d2::scheduler::*;
+use e2d2::operators::{ReceiveBatch, Batch, merge_auto, SchedulingPolicy};
+use e2d2::scheduler::{Runnable, Scheduler, StandaloneScheduler};
 use e2d2::allocators::CacheAligned;
 use e2d2::headers::{IpHeader, MacHeader, TcpHeader};
 use e2d2::interface::*;
@@ -22,12 +22,12 @@ use separator::Separatable;
 
 use cmanager::{ Connection, CKey, ConnectionManager };
 use netfcts::timer_wheel::TimerWheel;
-use EngineConfig;
-use { PipelineId, MessageFrom, MessageTo, TaskType };
-use netfcts::timer_wheel::MILLIS_TO_CYCLES;
+use netfcts::system::SystemData;
 use netfcts::tcp_common::*;
 use netfcts::tasks;
 
+use EngineConfig;
+use { PipelineId, MessageFrom, MessageTo, TaskType };
 use Timeouts;
 
 use is_kni_core;
@@ -45,6 +45,7 @@ pub fn setup_forwarder<F1, F2>(
     f_process_payload_c_s: Arc<F2>,
     flowdirector_map: HashMap<i32, Arc<FlowDirector>>,
     tx: Sender<MessageFrom>,
+    system_data: SystemData,
 ) where
     F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
     F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + Sync + 'static,
@@ -70,7 +71,7 @@ pub fn setup_forwarder<F1, F2>(
     );
 
     let timeouts = Timeouts::default_or_some(&engine_config.timeouts);
-    let mut wheel = TimerWheel::new(128, 100 * MILLIS_TO_CYCLES, 128);
+    let mut wheel = TimerWheel::new(128, system_data.cpu_clock / 10, 128);
 
     /*
     // setting up a a reverse message channel between this pipeline and the main program thread
@@ -108,7 +109,7 @@ pub fn setup_forwarder<F1, F2>(
     let thread_id = format!("<c{}, rx{}>: ", core, pci.rxq());
     let pd_clone = me.clone();
     // only accept traffic from PCI with matching L2 address
-    let thread_id_clone=thread_id.clone();
+    let thread_id_clone = thread_id.clone();
     let l2filter_from_pci = ReceiveBatch::new(pci.clone()).parse::<MacHeader>().filter(box move |p| {
         let header = p.get_header();
         if header.dst == pd_clone.mac {
@@ -129,7 +130,7 @@ pub fn setup_forwarder<F1, F2>(
     let uuid_l2groupby = Uuid::new_v4();
     let uuid_l2groupby_clone = uuid_l2groupby.clone();
     let pipeline_ip = cm.ip();
-    let thread_id_1=thread_id.clone();
+    let thread_id_1 = thread_id.clone();
     // group the traffic into TCP traffic addressed to Proxy (group 1),
     // and send all other traffic to KNI (group 0)
     let mut l2groups = l2filter_from_pci.group_by(
@@ -137,7 +138,7 @@ pub fn setup_forwarder<F1, F2>(
         box move |p| {
             if p.get_header().etype() != 0x0800 {
                 // everything other than Ipv4 we send to KNI
-                return 0
+                return 0;
             }
             let payload = p.get_payload();
             let ipflow = ipv4_extract_flow(payload);
@@ -150,10 +151,11 @@ pub fn setup_forwarder<F1, F2>(
                     0
                 }
             } else {
-                debug!("{} unexpected IP packet, sending to KNI: {}, dest-ip= {}, ip assigned to core = {}, proto= {}",
-                    thread_id_1, 
-                    p.get_header(), 
-                    Ipv4Addr::from(ipflow.dst_ip), 
+                debug!(
+                    "{} unexpected IP packet, sending to KNI: {}, dest-ip= {}, ip assigned to core = {}, proto= {}",
+                    thread_id_1,
+                    p.get_header(),
+                    Ipv4Addr::from(ipflow.dst_ip),
                     Ipv4Addr::from(pipeline_ip),
                     ipflow.proto,
                 );
@@ -174,20 +176,13 @@ pub fn setup_forwarder<F1, F2>(
     assert!(wheel.resolution() > tick_generator.tick_length());
     let wheel_tick_reduction_factor = wheel.resolution() / tick_generator.tick_length();
     let mut ticks = 0;
-    tasks::install_task(
-        sched,
-        "TickGenerator",
-        tick_generator,
-    );
+    tasks::install_task(sched, "TickGenerator", tick_generator);
 
     let pipeline_id_clone = pipeline_id.clone();
 
-    let l2_input_stream = merge_with_selector(
-        vec![
-            consumer_timerticks.compose(),
-            l2groups.get_group(1).unwrap().compose(),
-        ],
-        vec![1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],  // we take ten times from l2groups and then from timer_ticks
+    let l2_input_stream = merge_auto(
+        vec![consumer_timerticks.compose(), l2groups.get_group(1).unwrap().compose()],
+        SchedulingPolicy::LongestQueue, // we take ten times from l2groups and then from timer_ticks
     );
 
     // group 0 -> dump packets
@@ -568,7 +563,7 @@ pub fn setup_forwarder<F1, F2>(
                                     trace!("{} (SYN-)ACK to client, L3: { }, L4: { }", thread_id, hs.ip, hs.tcp);
                                     counter_c[TcpStatistics::RecvSyn] += 1;
                                     counter_c[TcpStatistics::SentSynAck] += 1;
-                                    wheel.schedule(&(timeouts.established.unwrap() * MILLIS_TO_CYCLES), c.port());
+                                    wheel.schedule(&(timeouts.established.unwrap()*system_data.cpu_clock/1000), c.port());
                                     group_index = 1;
                                 } else {
                                     warn!("received client SYN in state {:?}/{:?}", c.con_rec_c.states(), c.con_rec_s.states());
@@ -768,10 +763,10 @@ pub fn setup_forwarder<F1, F2>(
 
     let l2kniflow = l2groups.get_group(0).unwrap().compose();
     let l4kniflow = l4groups.get_group(2).unwrap().compose();
-    let pipe2kni = merge(vec![l2kniflow, l4kniflow]).send(kni.clone());
+    let pipe2kni = merge_auto(vec![l2kniflow, l4kniflow], SchedulingPolicy::LongestQueue).send(kni.clone());
     let l4pciflow = l4groups.get_group(1).unwrap().compose();
     let l4dumpflow = l4groups.get_group(0).unwrap().filter(box move |_| false).compose();
-    let pipe2pci = merge(vec![l4pciflow, l4dumpflow]).send(pci.clone());
+    let pipe2pci = merge_auto(vec![l4pciflow, l4dumpflow], SchedulingPolicy::LongestQueue).send(pci.clone());
     let uuid_pipe2kni = Uuid::new_v4();
     let name = String::from("Pipe2Kni");
     sched.add_runnable(Runnable::from_task(uuid_pipe2kni, name, pipe2kni).move_unready());

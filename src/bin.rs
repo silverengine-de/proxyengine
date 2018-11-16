@@ -41,7 +41,7 @@ use separator::Separatable;
 use netfcts::initialize_flowdirector;
 use netfcts::tcp_common::{ReleaseCause};
 use netfcts::comm::{MessageFrom, MessageTo};
-
+use netfcts::system::SystemData;
 
 use tcp_proxy::{get_mac_from_ifname, read_config, setup_pipelines};
 use tcp_proxy::Connection;
@@ -66,6 +66,9 @@ pub fn main() {
         info!("dpdk log global level: {}", rte_log_get_global_level());
         info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
     }
+
+    let system_data = SystemData::detect();
+
     // read config file name from command line
     let args: Vec<String> = env::args().collect();
     let config_file;
@@ -118,7 +121,7 @@ pub fn main() {
         .targets
         .iter()
         .enumerate()
-        .map(|(i,srv_cfg)| L234Data {
+        .map(|(i, srv_cfg)| L234Data {
             mac: srv_cfg
                 .mac
                 .unwrap_or_else(|| get_mac_from_ifname(srv_cfg.linux_if.as_ref().unwrap()).unwrap()),
@@ -128,33 +131,25 @@ pub fn main() {
             index: i,
         }).collect();
 
-
     #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
     pub struct CData {
         // connection data sent as first payload packet
         pub reply_socket: SocketAddrV4, // the socket on which the trafficengine expects the reply from the DUT
         pub client_port: u16,
         pub uuid: Option<Uuid>,
-
     }
 
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_select_server = move |c: &mut Connection| {
-        //let socket=Box::new(bincode::deserialize::<SocketAddrV4>(&c.payload).expect("cannot deserialize SocketAddrV4"));
-        //String::from_utf8(*c.payload).expect("cannot convert utf8 to String");
-        let cdata:CData = serde_json::from_slice(&c.payload).expect("cannot deserialize CData");
+        let cdata: CData = serde_json::from_slice(&c.payload).expect("cannot deserialize CData");
 
         for l234 in &l234data {
             if l234.port == cdata.reply_socket.port() && l234.ip == u32::from(*cdata.reply_socket.ip()) {
-                c.server=Some((*l234).clone());
+                c.server = Some((*l234).clone());
                 break;
             }
         }
 
-        //let remainder = c.get_client_sock().port().rotate_right(1) as usize % l234data.len();
-        // c.server = Some(l234data[remainder].clone());
-        // info!("selecting {}", proxy_config_cloned.servers[remainder].id);
-        // initialize userdata
         if let Some(_) = c.userdata {
             c.userdata.as_mut().unwrap().init();
         } else {
@@ -163,30 +158,7 @@ pub fn main() {
     };
 
     // this is the closure, which may modify the payload of client to server packets in a TCP connection
-    let f_process_payload_c_s = |_c: &mut Connection, _payload: &mut [u8], _tailroom: usize| {
-        /*
-        if let IResult::Done(_, c_tag) = parse_tag(payload) {
-            let userdata: &mut MyData = &mut c.userdata
-                .as_mut()
-                .unwrap()
-                .mut_userdata()
-                .downcast_mut()
-                .unwrap();
-            userdata.c2s_count += payload.len();
-            debug!(
-                "c->s (tailroom { }, {:?}): {:?}",
-                tailroom,
-                userdata,
-                c_tag,
-            );
-        }
-
-        unsafe {
-            let payload_sz = payload.len(); }
-            let p_payload= payload[0] as *mut u8;
-            process_payload(p_payload, payload_sz, tailroom);
-        } */
-    };
+    let f_process_payload_c_s = |_c: &mut Connection, _payload: &mut [u8], _tailroom: usize| {};
 
     fn check_system(context: NetBricksContext) -> Result<NetBricksContext> {
         for port in context.ports.values() {
@@ -206,13 +178,20 @@ pub fn main() {
         .and_then(|ctxt| check_system(ctxt))
     {
         Ok(mut context) => {
-            let flowdirector_map = initialize_flowdirector(&context, configuration.flow_steering_mode(), &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap());
-            unsafe { fdir_get_infos(1u16); }
+            let flowdirector_map = initialize_flowdirector(
+                &context,
+                configuration.flow_steering_mode(),
+                &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap(),
+            );
+            unsafe {
+                fdir_get_infos(1u16);
+            }
             context.start_schedulers();
             let (mtx, mrx) = channel::<MessageFrom>();
             let (reply_mtx, reply_mrx) = channel::<MessageTo>();
 
             let proxy_config_cloned = configuration.clone();
+            let system_data_cloned = system_data.clone();
             let mtx_clone = mtx.clone();
             let boxed_fss = Arc::new(f_select_server);
             let boxed_fpp = Arc::new(f_process_payload_c_s);
@@ -228,6 +207,7 @@ pub fn main() {
                         boxed_fpp.clone(),
                         flowdirector_map.clone(),
                         mtx_clone.clone(),
+                        system_data_cloned.clone(),
                     );
                 },
             ));
@@ -237,7 +217,11 @@ pub fn main() {
             spawn_recv_thread(mrx, context, configuration);
             mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
             // debug output on flow director:
-            if log_enabled!(log::Level::Debug)  { unsafe { fdir_get_infos(1u16); } }
+            if log_enabled!(log::Level::Debug) {
+                unsafe {
+                    fdir_get_infos(1u16);
+                }
+            }
 
             //main loop
             println!("press ctrl-c to terminate proxy ...");
@@ -283,61 +267,79 @@ pub fn main() {
             let mut completed_count_c = 0;
             for (_p, (con_recs, _)) in &con_records {
                 for c in con_recs {
-                    if (c.get_release_cause() == ReleaseCause::PassiveClose || c.get_release_cause() == ReleaseCause::ActiveClose)
+                    if (c.get_release_cause() == ReleaseCause::PassiveClose
+                        || c.get_release_cause() == ReleaseCause::ActiveClose)
                         && c.last_state() == &TcpState::Closed
-                        {
-                            completed_count_c += 1
-                        };
+                    {
+                        completed_count_c += 1
+                    };
                 }
             }
 
             let mut completed_count_s = 0;
-            for (_p, (_, con_recs)) in &con_records{
+            for (_p, (_, con_recs)) in &con_records {
                 for c in con_recs {
-                    if (c.get_release_cause() == ReleaseCause::PassiveClose || c.get_release_cause() == ReleaseCause::ActiveClose)
+                    if (c.get_release_cause() == ReleaseCause::PassiveClose
+                        || c.get_release_cause() == ReleaseCause::ActiveClose)
                         && c.last_state() == &TcpState::Closed
-                        {
-                            completed_count_s += 1
-                        };
+                    {
+                        completed_count_s += 1
+                    };
                 }
             }
-            info!("completed connections c/s: {}/{}", completed_count_c, completed_count_s );
+            info!("completed connections c/s: {}/{}", completed_count_c, completed_count_s);
 
             let mut file = match File::create("c_records.txt") {
-                Err(why) => panic!("couldn't create c_records.txt: {}",
-                                   why.description()),
+                Err(why) => panic!("couldn't create c_records.txt: {}", why.description()),
                 Ok(file) => file,
             };
             let mut f = BufWriter::new(file);
 
             for (p, (mut c_records_c, mut c_records_s)) in con_records {
                 info!("Pipeline {}:", p);
-                f.write_all(format!("Pipeline {}:\n", p).as_bytes()).expect("cannot write c_records");
+                f.write_all(format!("Pipeline {}:\n", p).as_bytes())
+                    .expect("cannot write c_records");
                 // make HashMap with key uuid
                 let mut by_uuid = HashMap::with_capacity(c_records_s.len());
-                for c in c_records_s { by_uuid.insert(c.uuid.unwrap(), c.clone()); }
-
+                for c in c_records_s {
+                    by_uuid.insert(c.uuid.unwrap(), c.clone());
+                }
 
                 if c_records_c.len() > 0 {
                     let mut completed_count = 0;
                     let mut min = c_records_c.iter().last().unwrap().clone();
                     let mut max = min.clone();
-                    c_records_c.sort_by( |a, b| a.sock.unwrap().port().cmp(&b.sock.unwrap().port()));
+                    c_records_c.sort_by(|a, b| a.sock.unwrap().port().cmp(&b.sock.unwrap().port()));
 
                     c_records_c.iter().enumerate().for_each(|(i, c)| {
-                        let uuid=c.uuid.as_ref().unwrap();
+                        let uuid = c.uuid.as_ref().unwrap();
                         let c_server = by_uuid.remove(uuid);
                         let line = format!("{:6}: {}\n", i, c);
                         f.write_all(line.as_bytes()).expect("cannot write c_records");
-                        f.write_all(format!("        {}\n", c_server.unwrap()).as_bytes()).expect("cannot write c_records");
-                        if (c.get_release_cause() == ReleaseCause::PassiveClose || c.get_release_cause() == ReleaseCause::ActiveClose) && c.states().last().unwrap() == &TcpState::Closed {
+                        f.write_all(format!("        {}\n", c_server.unwrap()).as_bytes())
+                            .expect("cannot write c_records");
+                        if (c.get_release_cause() == ReleaseCause::PassiveClose
+                            || c.get_release_cause() == ReleaseCause::ActiveClose)
+                            && c.states().last().unwrap() == &TcpState::Closed
+                        {
                             completed_count += 1
                         }
-                        if c.get_first_stamp().unwrap_or(u64::max_value()) < min.get_first_stamp().unwrap_or(u64::max_value()) { min = c.clone() }
-                        if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) { max = c.clone() }
-                        if i == (c_records_c.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some() {
+                        if c.get_first_stamp().unwrap_or(u64::max_value())
+                            < min.get_first_stamp().unwrap_or(u64::max_value())
+                        {
+                            min = c.clone()
+                        }
+                        if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
+                            max = c.clone()
+                        }
+                        if i == (c_records_c.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some()
+                        {
                             let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
-                            info!("total used cycles= {}, per connection = {}", total.separated_string(), (total / (i as u64 + 1)).separated_string());
+                            info!(
+                                "total used cycles= {}, per connection = {}",
+                                total.separated_string(),
+                                (total / (i as u64 + 1)).separated_string()
+                            );
                         }
                     });
                 }
