@@ -5,7 +5,8 @@ extern crate env_logger;
 #[macro_use]
 extern crate log;
 extern crate tcp_proxy;
-extern crate serde_json;
+//extern crate serde_json;
+extern crate bincode;
 extern crate uuid;
 #[macro_use]
 extern crate serde_derive;
@@ -141,7 +142,8 @@ pub fn main() {
 
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_select_server = move |c: &mut Connection| {
-        let cdata: CData = serde_json::from_slice(&c.payload).expect("cannot deserialize CData");
+        //let cdata: CData = serde_json::from_slice(&c.payload).expect("cannot deserialize CData");
+        let cdata: CData = bincode::deserialize::<CData>(&c.payload).expect("cannot deserialize CData");
 
         for l234 in &l234data {
             if l234.port == cdata.reply_socket.port() && l234.ip == u32::from(*cdata.reply_socket.ip()) {

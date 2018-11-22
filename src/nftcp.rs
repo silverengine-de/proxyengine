@@ -81,8 +81,6 @@ pub fn setup_forwarder<F1, F2>(
     tx.send(MessageFrom::Channel(pipeline_id.clone(), remote_tx)).unwrap();
     */
 
-    // TODO let mut statistics = ProxyMessages::new(pci.rxq() );
-
     // we need this queue for the delayed bindrequest
     let (producer, consumer) = new_mpsc_queue_pair();
 
@@ -679,7 +677,6 @@ pub fn setup_forwarder<F1, F2>(
                                     counter_s[TcpStatistics::RecvSynAck] += 1;
                                     c.server_con_established();
                                     trace!("{} established two-way client server connection, SYN-ACK received: L3: {}, L4: {}", thread_id, hs.ip, hs.tcp);
-                                    // TODO statistics.full_connect();
                                     server_synack_received(p, &mut c, &mut hs, &mut producer);
                                     counter_s[TcpStatistics::SentSynAck2] += 1;
                                     counter_s[TcpStatistics::Payload] += 1;
