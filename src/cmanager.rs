@@ -47,30 +47,43 @@ impl PartialEq for CKey {
 
 pub struct Connection {
     pub payload: Box<Vec<u8>>,
-    pub server: Option<L234Data>,
-    pub userdata: Option<Box<UserData>>,
     //Box makes the trait object sizeable
+    ///can be used by applications to store application specific connection state
+    pub userdata: Option<Box<UserData>>,
     pub client_mac: MacHeader,
     pub con_rec_c: ConRecord,
     pub con_rec_s: ConRecord,
-    /// c_seqn is seqn for connection to client,
+    /// seqn for connection to client,
     /// after the SYN-ACK from the target server it is the delta to be added to server seqn
     /// see 'server_synack_received'
     pub c_seqn: u32,
+    /// current ack no towards server (=expected seqn)
+    pub ackn_p2s: u32,
+    /// current ack no towards client (=expected seqn)
+    pub ackn_p2c: u32,
+    /// seqn_nxt for connection from client to server, only used during connection setup
+    pub f_seqn: u32,
     /// number of bytes inserted by proxy in connection from client to server
     pub c2s_inserted_bytes: usize,
-    pub f_seqn: u32, // seqn for connection from client
+    /// latest seqn of FIN seen for proxy to client
+    pub seqn_fin_p2c: u32,
+    /// latest seqn of FIN seen for proxy to server
+    pub seqn_fin_p2s: u32,
+
 }
 
 impl Connection {
     fn initialize(&mut self, client_sock: &SocketAddrV4, proxy_sport: u16) {
         self.payload.clear();
-        self.server = None;
         self.userdata = None;
         self.client_mac = MacHeader::default();
         self.c_seqn = 0;
         self.f_seqn = 0;
+        self.ackn_p2s = 0;
+        self.ackn_p2c = 0;
         self.c2s_inserted_bytes = 0;
+        self.seqn_fin_p2c = 0;
+        self.seqn_fin_p2s = 0;
         self.con_rec_c.init(TcpRole::Client, proxy_sport, Some(client_sock));
         self.con_rec_s.init(TcpRole::Server, proxy_sport, Some(client_sock));
         self.con_rec_s.uuid = self.con_rec_c.uuid.clone();
@@ -79,12 +92,15 @@ impl Connection {
     fn new() -> Connection {
         Connection {
             payload: Box::new(Vec::with_capacity(1500)),
-            server: None,
             userdata: None,
             client_mac: MacHeader::default(),
             c_seqn: 0,
+            ackn_p2s: 0,
+            ackn_p2c: 0,
             c2s_inserted_bytes: 0,
             f_seqn: 0,
+            seqn_fin_p2c: 0,
+            seqn_fin_p2s: 0,
             con_rec_c: ConRecord::new(),
             con_rec_s: ConRecord::new(),
         }
@@ -176,7 +192,7 @@ pub struct ConnectionManager {
     port2con: Vec<Connection>,
     pci: CacheAligned<PortQueue>, // the PortQueue for which connections are managed
     tcp_port_base: u16,
-    ip: u32, // ip address to use for connections of this manager
+    ip: u32, // ip address to use for connections of this manager/pipeline  towards the servers
 }
 
 const MAX_CONNECTIONS: usize = 0xFFFF as usize;

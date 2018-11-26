@@ -123,14 +123,14 @@ fn delayed_binding_proxy() {
         }).collect();
 
     let proxy_config_cloned = configuration.clone();
-
+    let l234data_clone=l234data.clone();
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_select_server = move |c: &mut Connection| {
         let s = String::from_utf8(c.payload.to_vec()).unwrap();
         // read first item in string and convert to usize:
         let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
-        let remainder = stars % l234data.len();
-        c.server = Some(l234data[remainder].clone());
+        let remainder = stars % l234data_clone.len();
+        c.con_rec_s.server_index = remainder;
         debug!("selecting {}", proxy_config_cloned.targets[remainder].id);
         // initialize userdata
         if let Some(_) = c.userdata {
@@ -163,11 +163,12 @@ fn delayed_binding_proxy() {
                         p,
                         s,
                         &proxy_config_cloned.engine,
-                        boxed_fss.clone(),
-                        boxed_fpp.clone(),
+                        l234data.clone(),
                         flowdirector_map.clone(),
                         mtx_clone.clone(),
                         system_data_cloned.clone(),
+                        boxed_fss.clone(),
+                        boxed_fpp.clone(),
                     );
                 },
             ));

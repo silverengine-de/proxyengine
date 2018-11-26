@@ -8,7 +8,7 @@ extern crate tcp_proxy;
 //extern crate serde_json;
 extern crate bincode;
 extern crate uuid;
-#[macro_use]
+//#[macro_use]
 extern crate serde_derive;
 extern crate netfcts;
 extern crate ipnet;
@@ -28,19 +28,19 @@ use std::sync::mpsc::channel;
 use std::sync::mpsc::RecvTimeoutError;
 use std::thread;
 use std::time::Duration;
-use std::net::SocketAddrV4;
+//use std::net::SocketAddrV4;
 use std::convert::From;
 use std::str::FromStr;
 use std::io::{BufWriter, Write};
 use std::error::Error;
 use std::fs::File;
 
-use uuid::Uuid;
+//use uuid::Uuid;
 use ipnet::Ipv4Net;
 use separator::Separatable;
 
 use netfcts::initialize_flowdirector;
-use netfcts::tcp_common::{ReleaseCause};
+use netfcts::tcp_common::{ReleaseCause, CData};
 use netfcts::comm::{MessageFrom, MessageTo};
 use netfcts::system::SystemData;
 
@@ -132,22 +132,15 @@ pub fn main() {
             index: i,
         }).collect();
 
-    #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-    pub struct CData {
-        // connection data sent as first payload packet
-        pub reply_socket: SocketAddrV4, // the socket on which the trafficengine expects the reply from the DUT
-        pub client_port: u16,
-        pub uuid: Option<Uuid>,
-    }
-
+    let l234data_clone=l234data.clone();
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_select_server = move |c: &mut Connection| {
         //let cdata: CData = serde_json::from_slice(&c.payload).expect("cannot deserialize CData");
         let cdata: CData = bincode::deserialize::<CData>(&c.payload).expect("cannot deserialize CData");
 
-        for l234 in &l234data {
+        for (i,l234) in l234data_clone.iter().enumerate() {
             if l234.port == cdata.reply_socket.port() && l234.ip == u32::from(*cdata.reply_socket.ip()) {
-                c.server = Some((*l234).clone());
+                c.con_rec_s.server_index = i;
                 break;
             }
         }
@@ -205,11 +198,12 @@ pub fn main() {
                         p,
                         s,
                         &proxy_config_cloned.engine,
-                        boxed_fss.clone(),
-                        boxed_fpp.clone(),
+                        l234data.clone(),
                         flowdirector_map.clone(),
                         mtx_clone.clone(),
                         system_data_cloned.clone(),
+                        boxed_fss.clone(),
+                        boxed_fpp.clone(),
                     );
                 },
             ));
@@ -291,6 +285,7 @@ pub fn main() {
             }
             info!("completed connections c/s: {}/{}", completed_count_c, completed_count_s);
 
+            // write connection records into a file:
             let mut file = match File::create("c_records.txt") {
                 Err(why) => panic!("couldn't create c_records.txt: {}", why.description()),
                 Ok(file) => file,

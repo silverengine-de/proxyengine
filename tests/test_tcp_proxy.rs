@@ -124,15 +124,16 @@ fn delayed_binding_proxy() {
             server_id: srv_cfg.id.clone(),
             index: i,
         }).collect();
-    let proxy_config_cloned = configuration.clone();
 
+    let proxy_config_cloned = configuration.clone();
+    let l234data_clone=l234data.clone();
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_select_server = move |c: &mut Connection| {
         let s = String::from_utf8(c.payload.to_vec()).unwrap();
         // read first item in string and convert to usize:
         let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
-        let remainder = stars % l234data.len();
-        c.server = Some(l234data[remainder].clone());
+        let remainder = stars % l234data_clone.len();
+        c.con_rec_s.server_index = remainder;
         debug!("selecting {}", proxy_config_cloned.targets[remainder].id);
         // initialize userdata
         if let Some(_) = c.userdata {
@@ -188,11 +189,12 @@ fn delayed_binding_proxy() {
                         p,
                         s,
                         &proxy_config_cloned.engine,
-                        boxed_fss.clone(),
-                        boxed_fpp.clone(),
+                        l234data.clone(),
                         flowdirector_map.clone(),
                         mtx_clone.clone(),
                         system_data_cloned.clone(),
+                        boxed_fss.clone(),
+                        boxed_fpp.clone(),
                     );
                 },
             ));
@@ -332,6 +334,7 @@ fn delayed_binding_proxy() {
             }
             info!("completed connections c/s: {}/{}", completed_count_c, completed_count_s );
 
+            // write connection records into file
             let mut file = match File::create("c_records.txt") {
                 Err(why) => panic!("couldn't create c_records.txt: {}",
                                    why.description()),
@@ -377,16 +380,21 @@ fn delayed_binding_proxy() {
                         tcp_counters_s.get(&p).unwrap()[TcpStatistics::RecvSynAck]
                     );
                     assert_eq!(
-                        tcp_counters_s.get(&p).unwrap()[TcpStatistics::RecvFin],
-                        tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvFinAck]
+                        tcp_counters_s.get(&p).unwrap()[TcpStatistics::RecvFin] + tcp_counters_s.get(&p).unwrap()[TcpStatistics::RecvFinAck],
+                        tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvFinAck] + tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvFin]
                     );
                     assert_eq!(
-                        tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvFinAck],
+                        tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvFin],
+                        tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvFinAck2]
+                    );
+                    assert_eq!(
+                        tcp_counters_s.get(&p).unwrap()[TcpStatistics::RecvFin],
                         tcp_counters_s.get(&p).unwrap()[TcpStatistics::RecvFinAck2]
                     );
                 }
             }
 
+            f.flush().expect("cannot flush BufWriter");
             mtx.send(MessageFrom::Exit).unwrap();
             thread::sleep(Duration::from_millis(2000));
 

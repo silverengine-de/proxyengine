@@ -91,6 +91,18 @@ pub struct EngineConfig {
     pub port: u16,
 }
 
+impl EngineConfig {
+    pub fn get_l234data(&self) -> L234Data {
+        L234Data {
+            mac: MacAddress::parse_str(&self.mac).unwrap(),
+            ip: u32::from(self.ipnet.parse::<Ipv4Net>().unwrap().addr()),
+            port: self.port,
+            server_id: "Engine".to_string(),
+            index: 0,
+        }
+    }
+}
+
 #[derive(Deserialize, Clone)]
 pub struct TargetConfig {
     pub id: String,
@@ -264,11 +276,12 @@ pub fn setup_pipelines<F1, F2>(
     ports: HashSet<CacheAligned<PortQueue>>,
     sched: &mut StandaloneScheduler,
     engine_config: &EngineConfig,
-    f_select_server: Arc<F1>,
-    f_process_payload_c_s: Arc<F2>,
+    servers: Vec<L234Data>,
     flowdirector_map: HashMap<i32, Arc<FlowDirector>>,
     tx: Sender<MessageFrom>,
     system_data: SystemData,
+    f_select_server: Arc<F1>,
+    f_process_payload_c_s: Arc<F2>,
 ) where
     F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
     F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + Sync + 'static,
@@ -324,11 +337,12 @@ pub fn setup_pipelines<F1, F2>(
         kni.unwrap(),
         sched,
         engine_config,
-        f_select_server,
-        f_process_payload_c_s,
+        servers,
         flowdirector_map,
         tx,
         system_data,
+        f_select_server,
+        f_process_payload_c_s,
     );
 }
 
