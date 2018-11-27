@@ -18,4 +18,4 @@ engine      = { flow_steering="Ip", namespace="nskni", mac="a0:36:9f:82:9c:fc", 
 targets     = [ { id = "server 1", ip = "192.168.222.244", linux_if="enp7s0f1" , port = 12345 },
                 { id = "server 2", ip = "192.168.222.244", linux_if="enp7s0f1" , port = 12346 },
               ]
-test_size   = 32
+test_size   = 4

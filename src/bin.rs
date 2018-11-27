@@ -136,7 +136,7 @@ pub fn main() {
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_select_server = move |c: &mut Connection| {
         //let cdata: CData = serde_json::from_slice(&c.payload).expect("cannot deserialize CData");
-        let cdata: CData = bincode::deserialize::<CData>(&c.payload).expect("cannot deserialize CData");
+        let cdata: CData = bincode::deserialize::<CData>(c.payload_packet.as_ref().unwrap().get_payload()).expect("cannot deserialize CData");
 
         for (i,l234) in l234data_clone.iter().enumerate() {
             if l234.port == cdata.reply_socket.port() && l234.ip == u32::from(*cdata.reply_socket.ip()) {
