@@ -57,7 +57,7 @@ impl TimeAdder {
         self.count += 1;
 
         if self.count % self.sample_size == 0 {
-            info!("TimeAdder {}: sum = {}, count= {}, per count= {}", self.name, self.sum, self.count, self.sum / self.count);
+            debug!("TimeAdder {}: sum = {}, count= {}, per count= {}", self.name, self.sum, self.count, self.sum / self.count);
         }
     }
 }
