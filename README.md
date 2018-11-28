@@ -33,9 +33,11 @@ For running the tests both interfaces must be interconnected with a cross over c
 
 In addition some parameters like the Linux interface name (linux_if), the PCI slot id and the IP / MAC addresses in the test module configuration files  tests/*.toml need to be adapted. 
 
-Latest code of ProxyEngine was tested on two different 2-socket NUMA servers, each socket hosting 4, respectively 6 physical cores, running Centos 7.4. The benchmarking mentioned above was done with this two servers, one running iperf3 client and server instances, the other running the ProxyEngine as the device under test (DUT). More benchmarking to follow.
+Latest code of ProxyEngine was tested on two different 2-socket NUMA servers, each socket hosting 4, respectively 6 physical cores, running realtime kernel of Centos 7.5. The benchmarking mentioned above was done with this two servers, one running iperf3 client and server instances, the other running the ProxyEngine as the device under test (DUT).
+
+A recent performance test using [TrafficEngine](https://github.com/rstade/TrafficEngine) as traffic generator achieves ~200000 connections per second (cps) on a single core of a six-core E5-2640 with 2.50 GHz.
 
 
-_**ProxyEngine Test Configuration**_
+_**ProxyEngine Software Test Configuration**_
 
 ![proxyengine test configuration](https://github.com/silverengine-de/proxyengine/blob/master/proxyengine_config.png)
