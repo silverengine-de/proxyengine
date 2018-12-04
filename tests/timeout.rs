@@ -148,8 +148,6 @@ fn delayed_binding_proxy() {
 
             let proxy_config_cloned = configuration.clone();
             let system_data_cloned = system_data.clone();
-            let boxed_fss = Arc::new(f_select_server);
-            let boxed_fpp = Arc::new(f_process_payload_c_s);
 
             let mtx_clone = mtx.clone();
 
@@ -164,8 +162,8 @@ fn delayed_binding_proxy() {
                         flowdirector_map.clone(),
                         mtx_clone.clone(),
                         system_data_cloned.clone(),
-                        boxed_fss.clone(),
-                        boxed_fpp.clone(),
+                        f_select_server.clone(),
+                        f_process_payload_c_s.clone(),
                     );
                 },
             ));

@@ -179,8 +179,6 @@ fn delayed_binding_proxy() {
             let proxy_config_cloned = configuration.clone();
             let system_data_cloned = system_data.clone();
             let mtx_clone = mtx.clone();
-            let boxed_fss = Arc::new(f_select_server);
-            let boxed_fpp = Arc::new(f_process_payload_c_s);
 
             context.add_pipeline_to_run(Box::new(
                 move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
@@ -193,8 +191,8 @@ fn delayed_binding_proxy() {
                         flowdirector_map.clone(),
                         mtx_clone.clone(),
                         system_data_cloned.clone(),
-                        boxed_fss.clone(),
-                        boxed_fpp.clone(),
+                        f_select_server.clone(),
+                        f_process_payload_c_s.clone(),
                     );
                 },
             ));
@@ -289,10 +287,19 @@ fn delayed_binding_proxy() {
 
             loop {
                 match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
-                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s)) => {
+                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s, tx_packets)) => {
                         println!("\n");
                         println!("{}: client side {}", pipeline_id, tcp_counter_c);
                         println!("{}: server side {}", pipeline_id, tcp_counter_s);
+                        if tx_packets.len() > 0 {
+                            info!("{}: tx packets over time", pipeline_id);
+                            info!("      {:>24} -{:8}", tx_packets[0].0.separated_string(), tx_packets[0].1);
+                        }
+                        if tx_packets.len() > 1 {
+                            tx_packets.iter().zip(&tx_packets[1..]).enumerate().for_each(|(i,(&prev, &next))| {
+                                info!("{:4}: {:>24} -{:8}", i, (next.0 - prev.0).separated_string(), (next.1 - prev.1))
+                            });
+                        }
                         tcp_counters_c.insert(pipeline_id.clone(), tcp_counter_c);
                         tcp_counters_s.insert(pipeline_id, tcp_counter_s);
                     }

@@ -280,8 +280,8 @@ pub fn setup_pipelines<F1, F2>(
     flowdirector_map: HashMap<i32, Arc<FlowDirector>>,
     tx: Sender<MessageFrom>,
     system_data: SystemData,
-    f_select_server: Arc<F1>,
-    f_process_payload_c_s: Arc<F2>,
+    f_select_server: F1,
+    f_process_payload_c_s: F2,
 ) where
     F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
     F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + Sync + 'static,
@@ -452,22 +452,13 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                     context.stop();
                     break;
                 }
-                Ok(MessageFrom::Established(pipe, con_record)) => {
-                    debug!(
-                        "Established: {}: port= {}, c-sock={},  {} ",
-                        pipe,
-                        con_record.port,
-                        con_record.sock.unwrap(),
-                        con_record.server_index,
-                    );
-                }
-                Ok(MessageFrom::Counter(pipeline_id, tcp_counter_c, tcp_counter_s)) => {
+                Ok(MessageFrom::Counter(pipeline_id, tcp_counter_c, tcp_counter_s, tx_counter)) => {
                     debug!("{}: received Counter", pipeline_id);
                     if reply_to_main.is_some() {
                         reply_to_main
                             .as_ref()
                             .unwrap()
-                            .send(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s))
+                            .send(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s, tx_counter))
                             .unwrap();
                     };
                 }

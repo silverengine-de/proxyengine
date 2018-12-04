@@ -10,6 +10,7 @@ use e2d2::utils;
 use e2d2::common::EmptyMetadata;
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::cmp::min;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::mpsc::{Sender, channel};
@@ -32,6 +33,7 @@ use {PipelineId, MessageFrom, MessageTo, TaskType};
 use Timeouts;
 use is_kni_core;
 
+
 const MIN_FRAME_SIZE: usize = 60; // without fcs
 //const OBSERVE_PORT: u16 = 49152;
 
@@ -40,15 +42,17 @@ struct TimeAdder {
     count: u64,
     name: String,
     sample_size: u64,
+    pipeline_id: PipelineId,
 }
 
 impl TimeAdder {
-    fn new(name: &str, sample_size: u64) -> TimeAdder {
+    fn new(pipeline_id: PipelineId, name: &str, sample_size: u64) -> TimeAdder {
         TimeAdder {
             sum: 0,
             count: 0,
             name: name.to_string(),
             sample_size,
+            pipeline_id,
         }
     }
 
@@ -57,7 +61,7 @@ impl TimeAdder {
         self.count += 1;
 
         if self.count % self.sample_size == 0 {
-            debug!("TimeAdder {}: sum = {}, count= {}, per count= {}", self.name, self.sum, self.count, self.sum / self.count);
+            debug!("{} TimeAdder {}: sum = {}, count= {}, per count= {}", self.pipeline_id, self.name, self.sum, self.count, self.sum / self.count);
         }
     }
 }
@@ -73,8 +77,8 @@ pub fn setup_forwarder<F1, F2>(
     flowdirector_map: HashMap<i32, Arc<FlowDirector>>,
     tx: Sender<MessageFrom>,
     system_data: SystemData,
-    f_select_server: Arc<F1>,
-    f_process_payload_c_s: Arc<F2>,
+    f_select_server: F1,
+    f_process_payload_c_s: F2,
 ) where
     F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
     F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + Sync + 'static,
@@ -83,9 +87,10 @@ pub fn setup_forwarder<F1, F2>(
 
     #[derive(Clone)]
     struct Me {
-        l234: L234Data,
         // contains the client side ip address
-        ip_s: u32,  // server side ip address to use in this pipeline
+        l234: L234Data,
+        // server side ip address to use in this pipeline
+        ip_s: u32,
     }
 
     let me = Me { l234: engine_config.get_l234data(), ip_s: l4flow_for_this_core.ip };
@@ -193,12 +198,14 @@ pub fn setup_forwarder<F1, F2>(
             }
         },
         sched,
+        "L2-Groups".to_string(),
         uuid_l2groupby_clone,
     );
 
     let pipeline_id_clone = pipeline_id.clone();
     let mut counter_c = TcpCounter::new();
     let mut counter_s = TcpCounter::new();
+    let mut sent_packets =  Vec::with_capacity(1000);
 
     // set up the generator producing timer tick packets with our private EtherType
     let (producer_timerticks, consumer_timerticks) = new_mpsc_queue_pair();
@@ -212,18 +219,19 @@ pub fn setup_forwarder<F1, F2>(
 
 
     let l2_input_stream = merge_auto(
-        vec![consumer_timerticks.compose(), l2groups.get_group(1).unwrap().compose()],
-        SchedulingPolicy::LongestQueue, // we take ten times from l2groups and then from timer_ticks
+        vec![consumer_timerticks.set_urgent().compose(), l2groups.get_group(1).unwrap().compose()],
+        SchedulingPolicy::LongestQueue,
     );
 
     // group 0 -> dump packets
     // group 1 -> send to PCI
     // group 2 -> send to KNI
     let uuid_l4groupby = Uuid::new_v4();
+    let tx_stats = pci.tx_stats();
     // process TCP traffic addressed to Proxy
-    let mut time_adder_1 = TimeAdder::new("select_server", 500);
-    let mut time_adder_2 = TimeAdder::new("SYN - SYN-ACK", 500);
-    let mut time_adder_3= TimeAdder::new("connection lookup", 1000);
+    let mut time_adder_1 = TimeAdder::new(pipeline_id.clone(), "select_server", 9000);
+    let mut time_adder_2 = TimeAdder::new(pipeline_id.clone(), "SYN - SYN-ACK", 9000);
+    let mut time_adder_3= TimeAdder::new(pipeline_id.clone(), "connection lookup", 9000);
     let mut l4groups = l2_input_stream.parse::<MacHeader>().parse::<IpHeader>().parse::<TcpHeader>().group_by(
         3,
         box move |p: &mut Packet<TcpHeader, EmptyMetadata>| {
@@ -332,7 +340,7 @@ pub fn setup_forwarder<F1, F2>(
                 h: &mut HeaderState,
                 me: &Me,
                 servers: &Vec<L234Data>,
-                f_process_payload: &Arc<F>,
+                f_process_payload: F,
             ) where
                 F: Fn(&mut Connection, &mut [u8], usize),
             {
@@ -428,7 +436,7 @@ pub fn setup_forwarder<F1, F2>(
                 h: &mut HeaderState,
                 me: &Me,
                 servers: &Vec<L234Data>,
-                f_select_server: &Arc<F>,
+                f_select_server: &F,
             ) where
                 F: Fn(&mut Connection),
             {
@@ -601,6 +609,7 @@ pub fn setup_forwarder<F1, F2>(
                                     pipeline_id_clone.clone(),
                                     counter_c.clone(),
                                     counter_s.clone(),
+                                    sent_packets.clone(),
                                 )).unwrap();
                         }
                         Ok(MessageTo::FetchCRecords) => {
@@ -618,6 +627,8 @@ pub fn setup_forwarder<F1, F2>(
                         trace!("checking timeouts");
                         cm.release_timeouts(&utils::rdtsc_unsafe(), &mut wheel);
                     }
+                    //save stats
+                    sent_packets.push((utils::rdtsc_unsafe(), tx_stats.stats.load(Ordering::Relaxed)) );
                 }
                 _ => {
                     if hs_flow.dst_port == me.l234.port {
@@ -911,6 +922,7 @@ pub fn setup_forwarder<F1, F2>(
             group_index
         },
         sched,
+        "L4-Groups".to_string(),
         uuid_l4groupby,
     );
 

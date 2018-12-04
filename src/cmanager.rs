@@ -158,7 +158,6 @@ pub static GLOBAL_MANAGER_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
 pub struct ConnectionManager {
     con_records_c: Vec<ConRecord>,
     con_records_s: Vec<ConRecord>,
-    //sockport: Box<[Box<[(u32, u16);8]>; 0xFFFF]>,
     sock2port: BTreeMap<(u32,u16), u16>,
     free_ports: VecDeque<u16>,
     port2con: Vec<Connection>,
@@ -168,7 +167,7 @@ pub struct ConnectionManager {
     ip: u32, // ip address to use for connections of this manager/pipeline  towards the servers
 }
 
-const MAX_CONNECTIONS: usize = 0xFFFF as usize;
+const MAX_CONNECTIONS: usize = 0x3FFFF as usize;
 
 impl ConnectionManager {
     pub fn new(pci: CacheAligned<PortQueue>, l4flow: &L4Flow) -> ConnectionManager {
@@ -179,9 +178,8 @@ impl ConnectionManager {
         let mut cm = ConnectionManager {
             con_records_c: Vec::with_capacity(MAX_CONNECTIONS),
             con_records_s: Vec::with_capacity(MAX_CONNECTIONS),
-            //sock2port: HashMap::with_capacity(256),
             sock2port: BTreeMap::new(),
-            port2con: vec![Connection::new(); (!port_mask + 1) as usize],
+            port2con: vec![Connection::new(); !port_mask as usize + 1],
             free_ports: ((if tcp_port_base == 0 { 1 } else { tcp_port_base })..max_tcp_port).collect(), // port 0 is reserved and not usable for us
             pci,
             tcp_port_base,
