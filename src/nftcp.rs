@@ -205,7 +205,7 @@ pub fn setup_forwarder<F1, F2>(
     let pipeline_id_clone = pipeline_id.clone();
     let mut counter_c = TcpCounter::new();
     let mut counter_s = TcpCounter::new();
-    let mut sent_packets =  Vec::with_capacity(1000);
+    let mut rx_tx_stats = Vec::with_capacity(1000);
 
     // set up the generator producing timer tick packets with our private EtherType
     let (producer_timerticks, consumer_timerticks) = new_mpsc_queue_pair();
@@ -228,10 +228,14 @@ pub fn setup_forwarder<F1, F2>(
     // group 2 -> send to KNI
     let uuid_l4groupby = Uuid::new_v4();
     let tx_stats = pci.tx_stats();
+    let rx_stats = pci.rx_stats();
     // process TCP traffic addressed to Proxy
-    let mut time_adder_1 = TimeAdder::new(pipeline_id.clone(), "select_server", 9000);
-    let mut time_adder_2 = TimeAdder::new(pipeline_id.clone(), "SYN - SYN-ACK", 9000);
-    let mut time_adder_3= TimeAdder::new(pipeline_id.clone(), "connection lookup", 9000);
+    #[cfg(feature = "profiling")]
+        let mut time_adders = [
+        TimeAdder::new(pipeline_id.clone(), "select_server", 9000),
+        TimeAdder::new(pipeline_id.clone(), "SYN - SYN-ACK", 9000),
+        TimeAdder::new(pipeline_id.clone(), "connection lookup", 9000),
+    ];
     let mut l4groups = l2_input_stream.parse::<MacHeader>().parse::<IpHeader>().parse::<TcpHeader>().group_by(
         3,
         box move |p: &mut Packet<TcpHeader, EmptyMetadata>| {
@@ -440,9 +444,9 @@ pub fn setup_forwarder<F1, F2>(
             ) where
                 F: Fn(&mut Connection),
             {
-                let p_clone=p.clone(); // creates reference to the mbuf in p
-                let payload_sz=tcp_payload_size(&p_clone);
-                c.payload_packet=Some(p_clone);
+                let p_clone = p.clone(); // creates reference to the mbuf in p
+                let payload_sz = tcp_payload_size(&p_clone);
+                c.payload_packet = Some(p_clone);
                 f_select_server(c);
                 c.c2s_inserted_bytes = tcp_payload_size(c.payload_packet.as_ref().unwrap()) as isize - payload_sz as isize;
                 /*
@@ -465,7 +469,7 @@ pub fn setup_forwarder<F1, F2>(
                 */
                 set_header(&servers[c.con_rec_s.server_index], c.port(), h, me);
                 let syn = new_packet().unwrap().push_header(h.mac).unwrap().push_header(h.ip).unwrap().push_header(h.tcp).unwrap();
-                let mut old_p= unsafe { p.replace(syn) };
+                let mut old_p = unsafe { p.replace(syn) };
                 old_p.dereference_mbuf(); // must do this manually, so far
                 let hs_ip;
                 let hs_mac;
@@ -473,7 +477,7 @@ pub fn setup_forwarder<F1, F2>(
 
                 unsafe {
                     // converting to raw pointer avoids to borrow mutably from syn
-                    let ptr =p.get_mut_pre_header().unwrap() as *mut IpHeader;
+                    let ptr = p.get_mut_pre_header().unwrap() as *mut IpHeader;
                     hs_ip = &mut *ptr;
                     let ptr = p.get_mut_pre_pre_header().unwrap() as *mut MacHeader;
                     hs_mac = &mut *ptr;
@@ -525,7 +529,7 @@ pub fn setup_forwarder<F1, F2>(
                 producer.enqueue_one(p_clone);
 
                 if c.payload_packet.is_some() {
-                    let mut payload_packet= c.payload_packet.take().unwrap();
+                    let mut payload_packet = c.payload_packet.take().unwrap();
                     payload_packet.replace_header(h.tcp);  // same tcp header as in Ack packet
                     /*
                     let mut delayed_ip = new_packet().unwrap().push_header(h.mac).unwrap().push_header(h.ip).unwrap();
@@ -609,7 +613,7 @@ pub fn setup_forwarder<F1, F2>(
                                     pipeline_id_clone.clone(),
                                     counter_c.clone(),
                                     counter_s.clone(),
-                                    sent_packets.clone(),
+                                    rx_tx_stats.clone(),
                                 )).unwrap();
                         }
                         Ok(MessageTo::FetchCRecords) => {
@@ -628,7 +632,12 @@ pub fn setup_forwarder<F1, F2>(
                         cm.release_timeouts(&utils::rdtsc_unsafe(), &mut wheel);
                     }
                     //save stats
-                    sent_packets.push((utils::rdtsc_unsafe(), tx_stats.stats.load(Ordering::Relaxed)) );
+                    let tx_stats_now = tx_stats.stats.load(Ordering::Relaxed);
+                    let rx_stats_now = rx_stats.stats.load(Ordering::Relaxed);
+                    // only save changes
+                    if rx_tx_stats.last().is_none() || tx_stats_now != rx_tx_stats.last().unwrap().1 {
+                        rx_tx_stats.push((utils::rdtsc_unsafe(), rx_stats_now, tx_stats_now));
+                    }
                 }
                 _ => {
                     if hs_flow.dst_port == me.l234.port {
@@ -639,8 +648,13 @@ pub fn setup_forwarder<F1, F2>(
                             cm.get_mut_by_sock(&hs_flow.src_socket_addr())
                         };
 
-                        if hs.tcp.syn_flag() { time_adder_2.add(utils::rdtsc_unsafe() - timestamp_entry); }
-                        else {  time_adder_3.add(utils::rdtsc_unsafe() - timestamp_entry)}
+                        if hs.tcp.syn_flag() {
+                            #[cfg(feature = "profiling")]
+                            time_adders[1].add(utils::rdtsc_unsafe() - timestamp_entry);
+                        } else {
+                            #[cfg(feature = "profiling")]
+                            time_adders[2].add(utils::rdtsc_unsafe() - timestamp_entry)
+                        }
 
                         if opt_c.is_none() {
                             warn!("{} unexpected client side packet (seq={}): no state for socket {}, sending to KNI i/f", thread_id, hs.tcp.seq_num(), hs_flow.src_socket_addr());
@@ -763,7 +777,8 @@ pub fn setup_forwarder<F1, F2>(
                                 && old_s_state == TcpState::Listen {
                                 // should be the first payload packet from client
                                 select_server(p, &mut c, &mut hs, &me, &servers, &f_select_server);
-                                time_adder_1.add(utils::rdtsc_unsafe() - timestamp_entry);
+                                #[cfg(feature = "profiling")]
+                                time_adders[1].add(utils::rdtsc_unsafe() - timestamp_entry);
                                 trace!("{} SYN packet to server - L3: {}, L4: {}", thread_id, hs.ip, p.get_header());
                                 c.con_rec_s.push_state(TcpState::SynReceived);
                                 counter_c[TcpStatistics::Payload] += 1;
@@ -852,7 +867,7 @@ pub fn setup_forwarder<F1, F2>(
                                         counter_c[TcpStatistics::SentFin] += 1;
                                     }
                                 } else if old_c_state >= TcpState::LastAck && hs.tcp.ack_flag() {
-                                    if  hs.tcp.ack_num() == c.seqn_fin_p2s.wrapping_add(1) {
+                                    if hs.tcp.ack_num() == c.seqn_fin_p2s.wrapping_add(1) {
                                         // received  Ack from server for a FIN
                                         match old_c_state {
                                             TcpState::LastAck => {

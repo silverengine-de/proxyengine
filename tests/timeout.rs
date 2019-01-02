@@ -32,11 +32,10 @@ use e2d2::allocators::CacheAligned;
 use netfcts::initialize_flowdirector;
 use netfcts::tcp_common::ReleaseCause;
 use netfcts::comm::{ MessageFrom, MessageTo };
-use netfcts::system::SystemData;
+use netfcts::system::{SystemData, get_mac_from_ifname};
 
 use tcp_proxy::Connection;
 use tcp_proxy::{read_config, };
-use tcp_proxy::get_mac_from_ifname;
 use tcp_proxy::setup_pipelines;
 use tcp_proxy::Container;
 use tcp_proxy::L234Data;

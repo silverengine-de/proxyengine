@@ -16,12 +16,9 @@ extern crate eui48;
 extern crate ipnet;
 extern crate serde;
 extern crate uuid;
-#[macro_use]
-extern crate error_chain;
 extern crate netfcts;
 
 pub mod nftcp;
-pub mod errors;
 mod cmanager;
 
 pub use netfcts::tcp_common::{CData, L234Data, UserData, TcpRole, TcpState, TcpCounter, TcpStatistics};
@@ -35,13 +32,13 @@ use eui48::MacAddress;
 use uuid::Uuid;
 use separator::Separatable;
 
-use e2d2::native::zcsi::*;
 use e2d2::common::ErrorKind as E2d2ErrorKind;
 use e2d2::scheduler::*;
 use e2d2::allocators::CacheAligned;
 use e2d2::interface::{PortQueue, PmdPort, FlowDirector};
 
-use errors::*;
+use netfcts::errors::*;
+use netfcts::io::print_hard_statistics;
 use nftcp::setup_forwarder;
 use netfcts::{is_kni_core, setup_kni, FlowSteeringMode};
 use netfcts::comm::{MessageFrom, MessageTo, PipelineId};
@@ -52,10 +49,7 @@ use std::io::Read;
 use std::any::Any;
 use std::net::Ipv4Addr;
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::Path;
 use std::sync::Arc;
-use std::ptr;
 use std::sync::mpsc::Sender;
 use std::sync::mpsc::Receiver;
 use std::thread;
@@ -206,71 +200,6 @@ impl Container {
     }
 }
 
-pub fn get_mac_from_ifname(ifname: &str) -> Result<MacAddress> {
-    let iface = Path::new("/sys/class/net").join(ifname).join("address");
-    let mut macaddr = String::new();
-    fs::File::open(iface).map_err(|e| e.into()).and_then(|mut f| {
-        f.read_to_string(&mut macaddr)
-            .map_err(|e| e.into())
-            .and_then(|_| MacAddress::parse_str(&macaddr.lines().next().unwrap_or("")).map_err(|e| e.into()))
-    })
-}
-
-pub fn get_mac_string_from_ifname(ifname: &str) -> Result<String> {
-    let iface = Path::new("/sys/class/net").join(ifname).join("address");
-    let mut macaddr = String::new();
-    fs::File::open(iface).map_err(|e| e.into()).and_then(|mut f| {
-        f.read_to_string(&mut macaddr)
-            .map_err(|e| e.into())
-            .and_then(|_| Ok(macaddr.lines().next().unwrap_or("").to_string()))
-    })
-}
-
-pub fn print_hard_statistics(port_id: u16) -> i32 {
-    let stats = RteEthStats::new();
-    let retval;
-    unsafe {
-        retval = rte_eth_stats_get(port_id, &stats as *const RteEthStats);
-    }
-    if retval == 0 {
-        println!("Port {}:\n{}\n", port_id, stats);
-    }
-    retval
-}
-
-pub fn print_xstatistics(port_id: u16) -> i32 {
-    let len;
-    unsafe {
-        len = rte_eth_xstats_get_names_by_id(port_id, ptr::null(), 0, ptr::null());
-        if len < 0 {
-            return len;
-        }
-        let xstats_names = vec![
-            RteEthXstatName {
-                name: [0; RTE_ETH_XSTATS_NAME_SIZE],
-            };
-            len as usize
-        ];
-        let ids = vec![0u64; len as usize];
-        if len != rte_eth_xstats_get_names_by_id(port_id, xstats_names.as_ptr(), len as u32, ptr::null()) {
-            return -1;
-        };
-        let values = vec![0u64; len as usize];
-
-        if len != rte_eth_xstats_get_by_id(port_id, ptr::null(), values.as_ptr(), 0 as u32) {
-            return -1;
-        }
-
-        for i in 0..len as usize {
-            rte_eth_xstats_get_id_by_name(port_id, xstats_names[i].to_ptr(), &ids[i]);
-            {
-                println!("{}, {}: {}", i, xstats_names[i].to_str().unwrap(), values[i]);
-            }
-        }
-    }
-    len
-}
-
 pub fn setup_pipelines<F1, F2>(
     core: i32,
     ports: HashSet<CacheAligned<PortQueue>>,
@@ -353,7 +282,6 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
     let _handle = thread::spawn(move || {
         let mut senders = HashMap::new();
         let mut tasks: Vec<Vec<(PipelineId, Uuid)>> = Vec::with_capacity(TaskType::NoTaskTypes as usize);
-        let mut start_tsc: HashMap<(PipelineId, &'static str), u64> = HashMap::new(); // start time stamps for tasks
         let mut reply_to_main = None;
 
         for _t in 0..TaskType::NoTaskTypes as usize {
@@ -407,29 +335,6 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                 Ok(MessageFrom::Task(pipeline_id, uuid, task_type)) => {
                     debug!("{}: task uuid= {}, type={:?}", pipeline_id, uuid, task_type);
                     tasks[task_type as usize].push((pipeline_id, uuid));
-                }
-                Ok(MessageFrom::GenTimeStamp(pipeline_id, item, count, tsc0, tsc1)) => {
-                    debug!(
-                        "pipe {}: GenTimeStamp for item {} -> count= {}, tsc0= {}, tsc1= {}",
-                        pipeline_id,
-                        item,
-                        count,
-                        tsc0.separated_string(),
-                        tsc1.separated_string(),
-                    );
-                    if count == 0 {
-                        start_tsc.insert((pipeline_id, item), tsc0);
-                    } else {
-                        let diff = tsc0 - start_tsc.get(&(pipeline_id.clone(), item)).unwrap();
-                        info!(
-                            "pipe {}: item= {}, count= {}, elapsed= {} cy, per count= {} cy",
-                            pipeline_id,
-                            item,
-                            count,
-                            diff.separated_string(),
-                            diff / count as u64,
-                        );
-                    };
                 }
                 Ok(MessageFrom::Channel(pipeline_id, sender)) => {
                     debug!("got sender from {}", pipeline_id);

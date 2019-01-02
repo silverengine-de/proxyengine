@@ -43,11 +43,15 @@ use netfcts::initialize_flowdirector;
 use netfcts::tcp_common::{ReleaseCause, CData};
 use netfcts::comm::{MessageFrom, MessageTo};
 use netfcts::system::SystemData;
+use netfcts::errors::*;
+use netfcts::io::{ print_tcp_counters };
+#[cfg(feature = "profiling")]
+use netfcts::io::print_rx_tx_counters;
+use netfcts::system::get_mac_from_ifname;
 
-use tcp_proxy::{get_mac_from_ifname, read_config, setup_pipelines};
+use tcp_proxy::{read_config, setup_pipelines};
 use tcp_proxy::Connection;
 use tcp_proxy::Container;
-use tcp_proxy::errors::*;
 use tcp_proxy::L234Data;
 use tcp_proxy::spawn_recv_thread;
 use tcp_proxy::TcpState;
@@ -237,19 +241,10 @@ pub fn main() {
 
             loop {
                 match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
-                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s, tx_packets)) => {
-                        println!("\n");
-                        println!("{}: client side {}", pipeline_id, tcp_counter_c);
-                        println!("{}: server side {}", pipeline_id, tcp_counter_s);
-                        if tx_packets.len() > 0 {
-                            info!("{}: tx packets over time", pipeline_id);
-                            info!("      {:>24} -{:8}", tx_packets[0].0.separated_string(), tx_packets[0].1);
-                        }
-                        if tx_packets.len() > 1 {
-                            tx_packets.iter().zip(&tx_packets[1..]).enumerate().for_each(|(i,(&prev, &next))| {
-                                info!("{:4}: {:>24} -{:8}", i, (next.0 - prev.0).separated_string(), (next.1 - prev.1))
-                            });
-                        }
+                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s, _rx_tx_stats)) => {
+                        print_tcp_counters(&pipeline_id, &tcp_counter_c, &tcp_counter_s);
+                        #[cfg(feature = "profiling")]
+                            print_rx_tx_counters(&pipeline_id, &_rx_tx_stats);
                         tcp_counters_c.insert(pipeline_id.clone(), tcp_counter_c);
                         tcp_counters_s.insert(pipeline_id, tcp_counter_s);
                     }
