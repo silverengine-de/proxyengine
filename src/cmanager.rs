@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{Ipv4Addr};
 use std::collections::{VecDeque, BTreeMap};
 use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
 use std::fmt;
@@ -43,7 +43,7 @@ pub struct Connection{
 }
 
 impl  Connection {
-    fn initialize(&mut self, client_sock: &SocketAddrV4, proxy_sport: u16) {
+    fn initialize(&mut self, client_sock: &(u32, u16), proxy_sport: u16) {
         //self.payload.clear();
         self.userdata = None;
         self.client_mac = MacHeader::default();
@@ -108,12 +108,12 @@ impl  Connection {
     }
 
     #[inline]
-    pub fn get_client_sock(&self) -> &Option<SocketAddrV4> {
+    pub fn get_client_sock(&self) -> &Option<(u32, u16)> {
         &self.con_rec_c.sock
     }
 
     #[inline]
-    pub fn set_client_sock(&mut self, client_sock: SocketAddrV4) {
+    pub fn set_client_sock(&mut self, client_sock: (u32, u16)) {
         self.con_rec_c.sock = Some(client_sock);
     }
 
@@ -235,9 +235,8 @@ impl ConnectionManager {
         }
     }
 
-    pub fn get_mut_by_sock(&mut self, sock: &SocketAddrV4) -> Option<&mut Connection> {
-        let s = (u32::from(*sock.ip()), sock.port());
-        let port = self.sock2port.get(&s);
+    pub fn get_mut_by_sock(&mut self, sock: &(u32, u16)) -> Option<&mut Connection> {
+        let port = self.sock2port.get(sock);
         if port.is_some() {
             Some(&mut self.port2con[(port.unwrap() - self.tcp_port_base) as usize])
         } else {
@@ -245,11 +244,10 @@ impl ConnectionManager {
         }
     }
 
-    pub fn get_mut_or_insert(&mut self, sock: &SocketAddrV4) -> Option<&mut Connection> {
-        let s = (u32::from(*sock.ip()), sock.port());
+    pub fn get_mut_or_insert(&mut self, sock: &(u32, u16)) -> Option<&mut Connection> {
         {
             // we borrow sock2port here !
-            let port = self.sock2port.get(&s);
+            let port = self.sock2port.get(sock);
             if port.is_some() {
                 let cc= &mut self.port2con[(port.unwrap() - self.tcp_port_base) as usize];
                 assert_ne!(cc.port(), 0);
@@ -264,13 +262,13 @@ impl ConnectionManager {
             assert_eq!(cc.port(), 0);
             cc.initialize(sock, port);
             debug!(
-                "rxq={}: tcp flow for {} created on {}:{:?}",
+                "rxq={}: tcp flow for socket ({},{}) created on {}:{:?}",
                 self.pci.rxq(),
-                sock,
+                sock.0, sock.1,
                 Ipv4Addr::from(self.ip),
                 port
             );
-            self.sock2port.insert(s, port);
+            self.sock2port.insert(*sock, port);
             Some(cc)
         } else {
             warn!("out of ports");
@@ -289,8 +287,7 @@ impl ConnectionManager {
             {
                 let sock = c.get_client_sock();
                 if sock.is_some() {
-                    let s = (u32::from(*sock.unwrap().ip()), sock.unwrap().port());
-                    let port = self.sock2port.remove(&s);
+                    let port = self.sock2port.remove(&sock.unwrap());
                     assert_eq!(port.unwrap(), c.port());
                 }
             }

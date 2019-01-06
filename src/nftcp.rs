@@ -12,7 +12,7 @@ use e2d2::common::EmptyMetadata;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::cmp::min;
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{Ipv4Addr};
 use std::sync::mpsc::{Sender, channel};
 use std::collections::HashMap;
 
@@ -27,6 +27,7 @@ use netfcts::timer_wheel::TimerWheel;
 use netfcts::system::SystemData;
 use netfcts::tcp_common::*;
 use netfcts::tasks;
+use netfcts::TimeAdder;
 
 use EngineConfig;
 use {PipelineId, MessageFrom, MessageTo, TaskType};
@@ -36,35 +37,6 @@ use is_kni_core;
 
 const MIN_FRAME_SIZE: usize = 60; // without fcs
 //const OBSERVE_PORT: u16 = 49152;
-
-struct TimeAdder {
-    sum: u64,
-    count: u64,
-    name: String,
-    sample_size: u64,
-    pipeline_id: PipelineId,
-}
-
-impl TimeAdder {
-    fn new(pipeline_id: PipelineId, name: &str, sample_size: u64) -> TimeAdder {
-        TimeAdder {
-            sum: 0,
-            count: 0,
-            name: name.to_string(),
-            sample_size,
-            pipeline_id,
-        }
-    }
-
-    fn add(&mut self, time_diff: u64) {
-        self.sum += time_diff;
-        self.count += 1;
-
-        if self.count % self.sample_size == 0 {
-            debug!("{} TimeAdder {}: sum = {}, count= {}, per count= {}", self.pipeline_id, self.name, self.sum, self.count, self.sum / self.count);
-        }
-    }
-}
 
 
 pub fn setup_forwarder<F1, F2>(
@@ -232,9 +204,9 @@ pub fn setup_forwarder<F1, F2>(
     // process TCP traffic addressed to Proxy
     #[cfg(feature = "profiling")]
         let mut time_adders = [
-        TimeAdder::new(pipeline_id.clone(), "select_server", 9000),
-        TimeAdder::new(pipeline_id.clone(), "SYN - SYN-ACK", 9000),
-        TimeAdder::new(pipeline_id.clone(), "connection lookup", 9000),
+        TimeAdder::new("select_server", 9000),
+        TimeAdder::new("SYN - SYN-ACK", 9000),
+        TimeAdder::new("connection lookup", 9000),
     ];
     let mut l4groups = l2_input_stream.parse::<MacHeader>().parse::<IpHeader>().parse::<TcpHeader>().group_by(
         3,
@@ -303,7 +275,7 @@ pub fn setup_forwarder<F1, F2>(
             fn client_syn_received(p: &mut Packet<TcpHeader, EmptyMetadata>, c: &mut Connection, h: &mut HeaderState) {
                 c.con_rec_c.push_state(TcpState::SynSent);
                 c.client_mac = h.mac.clone();
-                c.set_client_sock(SocketAddrV4::new(Ipv4Addr::from(h.ip.src()), h.tcp.src_port()));
+                c.set_client_sock((h.ip.src(), h.tcp.src_port()));
                 // debug!("checksum in = {:X}",p.get_header().checksum());
                 remove_tcp_options(p, h);
                 make_reply_packet(h);
@@ -401,13 +373,13 @@ pub fn setup_forwarder<F1, F2>(
                 h.mac.set_smac(&me.l234.mac);
                 let ip_server = h.ip.src();
                 let old_dest_ip = h.ip.dst();
-                h.ip.set_dst(u32::from(*c.get_client_sock().unwrap().ip()));
+                h.ip.set_dst(c.get_client_sock().unwrap().0);
                 h.ip.set_src(me.l234.ip);
                 let server_src_port = h.tcp.src_port();
                 h.tcp.set_src_port(me.l234.port);
-                h.tcp.set_dst_port(c.get_client_sock().unwrap().port());
+                h.tcp.set_dst_port(c.get_client_sock().unwrap().1);
                 h.tcp.update_checksum_incremental(server_src_port, me.l234.port);
-                h.tcp.update_checksum_incremental(c.port(), c.get_client_sock().unwrap().port());
+                h.tcp.update_checksum_incremental(c.port(), c.get_client_sock().unwrap().1);
                 h.tcp.update_checksum_incremental(
                     !finalize_checksum(ip_server),
                     !finalize_checksum(me.l234.ip),
@@ -415,7 +387,7 @@ pub fn setup_forwarder<F1, F2>(
                 //if c.get_client_sock().unwrap().port() == OBSERVE_PORT { info!("server_to_client pos 1: {}", utils::rdtsc_unsafe().separated_string()) }
                 h.tcp.update_checksum_incremental(
                     !finalize_checksum(old_dest_ip),
-                    !finalize_checksum(u32::from(*c.get_client_sock().unwrap().ip())),
+                    !finalize_checksum(c.get_client_sock().unwrap().0),
                 );
                 // adapt seqn and ackn from server packet
                 let oldseqn = h.tcp.seq_num();
@@ -567,6 +539,7 @@ pub fn setup_forwarder<F1, F2>(
 
 // *****  the closure starts here with processing
 
+            #[cfg(feature = "profiling")]
             let timestamp_entry = utils::rdtsc_unsafe();
 
             let mut group_index = 0usize; // the index of the group to be returned
@@ -596,6 +569,7 @@ pub fn setup_forwarder<F1, F2>(
                 ip: hs_ip,
                 tcp: hs_tcp,
             };
+            let src_sock = (hs.ip.src(), hs.tcp.src_port());
 
             // if set by the following tcp state machine,
             // the port/connection becomes released afterwards
@@ -643,9 +617,9 @@ pub fn setup_forwarder<F1, F2>(
                     if hs_flow.dst_port == me.l234.port {
                         //trace!("client to server");
                         let opt_c = if hs.tcp.syn_flag() {
-                            cm.get_mut_or_insert(&hs_flow.src_socket_addr())
+                            cm.get_mut_or_insert(&src_sock)
                         } else {
-                            cm.get_mut_by_sock(&hs_flow.src_socket_addr())
+                            cm.get_mut_by_sock(&src_sock)
                         };
 
                         if hs.tcp.syn_flag() {
@@ -858,7 +832,7 @@ pub fn setup_forwarder<F1, F2>(
                                             "{} server closes connection on port {}/{} in state {:?}",
                                             thread_id,
                                             hs.tcp.dst_port(),
-                                            c.get_client_sock().unwrap().port(),
+                                            c.get_client_sock().unwrap().1,
                                             c.con_rec_s.states(),
                                         );
                                         c.con_rec_s.push_state(TcpState::FinWait1);
@@ -912,7 +886,7 @@ pub fn setup_forwarder<F1, F2>(
                                         "{} unexpected server side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
                                         thread_id,
                                         hs.tcp.dst_port(),
-                                        c.get_client_sock().unwrap().port(),
+                                        c.get_client_sock().unwrap().1,
                                         c.con_rec_c.states(),
                                         c.con_rec_s.states(),
                                     );

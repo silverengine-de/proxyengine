@@ -309,7 +309,7 @@ pub fn main() {
                     let mut completed_count = 0;
                     let mut min = c_records_c.iter().last().unwrap().clone();
                     let mut max = min.clone();
-                    c_records_c.sort_by(|a, b| a.sock.unwrap().port().cmp(&b.sock.unwrap().port()));
+                    c_records_c.sort_by(|a, b| a.sock.unwrap().1.cmp(&b.sock.unwrap().1));
 
                     c_records_c.iter().enumerate().for_each(|(i, c)| {
                         let uuid = c.uuid.as_ref().unwrap();
