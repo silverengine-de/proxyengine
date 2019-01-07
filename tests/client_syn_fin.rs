@@ -238,7 +238,7 @@ fn delayed_binding_proxy() {
                 match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
                     Ok(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s, rx_tx_stats)) => {
                         print_tcp_counters(&pipeline_id, &tcp_counter_c, &tcp_counter_s);
-                        print_rx_tx_counters(&pipeline_id, &rx_tx_stats);
+                        if rx_tx_stats.is_some() { print_rx_tx_counters(&pipeline_id, &rx_tx_stats.unwrap()); }
                         tcp_counters_c.insert(pipeline_id.clone(), tcp_counter_c);
                         tcp_counters_s.insert(pipeline_id, tcp_counter_s);
                     }
@@ -311,6 +311,7 @@ fn delayed_binding_proxy() {
             thread::sleep(Duration::from_millis(2000));
 
             info!("terminating ProxyEngine ...");
+            println!("\nPASSED\n");
             std::process::exit(0);
         }
         Err(ref e) => {

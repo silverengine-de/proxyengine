@@ -358,7 +358,6 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                     break;
                 }
                 Ok(MessageFrom::Counter(pipeline_id, tcp_counter_c, tcp_counter_s, tx_counter)) => {
-                    debug!("{}: received Counter", pipeline_id);
                     if reply_to_main.is_some() {
                         reply_to_main
                             .as_ref()

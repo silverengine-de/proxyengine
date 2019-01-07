@@ -27,9 +27,9 @@ case $TASK in
         sudo -E env "PATH=$PATH" $executable --nocapture
         ;;
     test_rfs_port)
-        export RUST_LOG="tcp_proxy=info,test_tcp_proxy=info,e2d2=info"
+        export RUST_LOG="tcp_proxy=debug,test_tcp_proxy=debug,e2d2=info"
         export RUST_BACKTRACE=1
-        executable=`cargo test $2 --no-run --message-format=json --test test_tcp_proxy | jq -r 'select((.profile.test == true) and (.target.name == "test_tcp_proxy")) | .filenames[]'`
+        executable=`cargo test $2 $3 $4 --no-run --message-format=json --test test_tcp_proxy | jq -r 'select((.profile.test == true) and (.target.name == "test_tcp_proxy")) | .filenames[]'`
         echo $executable
         echo ./tests/test_rfs_port.toml > tests/toml_file.txt
         sudo -E env "PATH=$PATH" $executable --nocapture

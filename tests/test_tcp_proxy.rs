@@ -277,7 +277,6 @@ fn delayed_binding_proxy() {
             mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
             thread::sleep(Duration::from_millis(1000 as u64));
 
-
             mtx.send(MessageFrom::FetchCounter).unwrap();
             mtx.send(MessageFrom::FetchCRecords).unwrap();
 
@@ -289,12 +288,12 @@ fn delayed_binding_proxy() {
                 match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
                     Ok(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s, rx_tx_stats)) => {
                         print_tcp_counters(&pipeline_id, &tcp_counter_c, &tcp_counter_s);
-                        print_rx_tx_counters(&pipeline_id, &rx_tx_stats);
+                        if rx_tx_stats.is_some() { print_rx_tx_counters(&pipeline_id, &rx_tx_stats.unwrap()); }
                         tcp_counters_c.insert(pipeline_id.clone(), tcp_counter_c);
                         tcp_counters_s.insert(pipeline_id, tcp_counter_s);
                     }
                     Ok(MessageTo::CRecords(pipeline_id, con_records_c, con_records_s)) => {
-                        debug!("{}: received CRecords", pipeline_id);
+                        debug!("{}: received {}/{} CRecords", pipeline_id, con_records_c.len(), con_records_s.len());
                         con_records.insert(pipeline_id, (con_records_c, con_records_s));
                     }
                     Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
@@ -329,7 +328,11 @@ fn delayed_binding_proxy() {
                         };
                 }
             }
-            info!("completed connections c/s: {}/{}", completed_count_c, completed_count_s );
+
+            println!("\ncompleted connections c/s: {}/{}\n", completed_count_c, completed_count_s);
+
+            assert_eq!(configuration.test_size.unwrap(), completed_count_c);
+            assert_eq!(configuration.test_size.unwrap(), completed_count_s);
 
             // write connection records into file
             let mut file = match File::create("c_records.txt") {
@@ -396,6 +399,7 @@ fn delayed_binding_proxy() {
             thread::sleep(Duration::from_millis(2000));
 
             info!("terminating ProxyEngine ...");
+            println!("\nPASSED\n");
             std::process::exit(0);
         }
         Err(ref e) => {

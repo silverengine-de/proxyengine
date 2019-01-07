@@ -241,10 +241,10 @@ pub fn main() {
 
             loop {
                 match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
-                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s, _rx_tx_stats)) => {
+                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s, rx_tx_stats)) => {
                         print_tcp_counters(&pipeline_id, &tcp_counter_c, &tcp_counter_s);
                         #[cfg(feature = "profiling")]
-                            print_rx_tx_counters(&pipeline_id, &_rx_tx_stats);
+                            print_rx_tx_counters(&pipeline_id, &rx_tx_stats.unwrap());
                         tcp_counters_c.insert(pipeline_id.clone(), tcp_counter_c);
                         tcp_counters_s.insert(pipeline_id, tcp_counter_s);
                     }
