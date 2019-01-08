@@ -64,7 +64,10 @@ pub fn setup_forwarder<F1, F2>(
         ip_s: u32,
     }
 
-    let me = Me { l234: engine_config.get_l234data(), ip_s: l4flow_for_this_core.ip };
+    let me = Me {
+        l234: engine_config.get_l234data(),
+        ip_s: l4flow_for_this_core.ip,
+    };
 
     let pipeline_id = PipelineId {
         core: core as u16,
@@ -73,10 +76,7 @@ pub fn setup_forwarder<F1, F2>(
     };
     debug!("enter setup_forwarder {}", pipeline_id);
 
-    let mut cm: ConnectionManager = ConnectionManager::new(
-        pci.clone(),
-        l4flow_for_this_core,
-    );
+    let mut cm: ConnectionManager = ConnectionManager::new(pci.clone(), l4flow_for_this_core);
 
     let timeouts = Timeouts::default_or_some(&engine_config.timeouts);
     let mut wheel = TimerWheel::new(128, system_data.cpu_clock / 10, 128);
@@ -92,9 +92,7 @@ pub fn setup_forwarder<F1, F2>(
 
     // forwarding frames coming from KNI to PCI, if we are the kni core
     if is_kni_core(pci) {
-        let forward2pci = ReceiveBatch::new(kni.clone())
-            .parse::<MacHeader>()
-            .send(pci.clone());
+        let forward2pci = ReceiveBatch::new(kni.clone()).parse::<MacHeader>().send(pci.clone());
         let uuid = Uuid::new_v4();
         let name = String::from("Kni2Pci");
         sched.add_runnable(Runnable::from_task(uuid, name, forward2pci).move_ready());
@@ -109,7 +107,7 @@ pub fn setup_forwarder<F1, F2>(
     let mut counter_c = TcpCounter::new();
     let mut counter_s = TcpCounter::new();
     #[cfg(feature = "profiling")]
-        let mut rx_tx_stats = Vec::with_capacity(1000);
+    let mut rx_tx_stats = Vec::with_capacity(1000);
 
     // set up the generator producing timer tick packets with our private EtherType
     let (producer_timerticks, consumer_timerticks) = new_mpsc_queue_pair();
@@ -118,8 +116,12 @@ pub fn setup_forwarder<F1, F2>(
     let wheel_tick_reduction_factor = wheel.resolution() / tick_generator.tick_length();
     let mut ticks = 0;
     let uuid_tick_generator = tasks::install_task(sched, "TickGenerator", tick_generator);
-    tx.send(MessageFrom::Task(pipeline_id.clone(), uuid_tick_generator, TaskType::TickGenerator))
-        .unwrap();
+    tx.send(MessageFrom::Task(
+        pipeline_id.clone(),
+        uuid_tick_generator,
+        TaskType::TickGenerator,
+    ))
+    .unwrap();
 
     let receive_pci = ReceiveBatch::new(pci.clone());
     let l2_input_stream = merge_auto(
@@ -133,12 +135,12 @@ pub fn setup_forwarder<F1, F2>(
     let csum_offload = pci.port.csum_offload();
     let uuid_l4groupby = Uuid::new_v4();
     #[cfg(feature = "profiling")]
-        let tx_stats = pci.tx_stats();
+    let tx_stats = pci.tx_stats();
     #[cfg(feature = "profiling")]
-        let rx_stats = pci.rx_stats();
+    let rx_stats = pci.rx_stats();
     // process TCP traffic addressed to Proxy
     #[cfg(feature = "profiling")]
-        let mut time_adders = [
+    let mut time_adders = [
         TimeAdder::new("select_server", 9000),
         TimeAdder::new("SYN - SYN-ACK", 9000),
         TimeAdder::new("connection lookup", 9000),
@@ -379,7 +381,10 @@ pub fn setup_forwarder<F1, F2>(
                     old_p.dereference_mbuf(); // as p_closure no longer references the original mbuf
 
                     // the new syn packet is the parsed proxy for p_closure (as we cannot push headers on the borrowed p_closure itself)
-                    let mut syn = p_closure.clone_without_ref_counting().push_header(h.ip).unwrap().push_header(h.tcp).unwrap();
+                    let mut syn = p_closure
+                        .clone_without_ref_counting()
+                        .push_header(h.ip).unwrap()
+                        .push_header(h.tcp).unwrap();
                     let ip_payload_size;
                     let ip_src;
                     let ip_dst;
@@ -865,7 +870,6 @@ pub fn setup_forwarder<F1, F2>(
     let l4pciflow = l4groups.get_group(1).unwrap().compose();
     let l4dumpflow = l4groups.get_group(0).unwrap().filter(box move |_| false).compose();
     let pipe2pci = merge_auto(vec![l4pciflow, l4dumpflow], SchedulingPolicy::LongestQueue).send(pci.clone());
-
 
     let uuid_pipe2kni = tasks::install_task(sched, "Pipe2Kni", pipe2kni);
     tx.send(MessageFrom::Task(pipeline_id.clone(), uuid_pipe2kni, TaskType::Pipe2Kni))

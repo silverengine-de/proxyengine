@@ -14,7 +14,7 @@ use netfcts::timer_wheel::TimerWheel;
 use netfcts::tcp_common::*;
 use netfcts::ConRecord;
 
-pub struct Connection{
+pub struct Connection {
     //pub payload: Vec<u8>,
     pub payload_packet: Option<Packet<TcpHeader, EmptyMetadata>>,
     //Box makes the trait object sizeable
@@ -39,10 +39,9 @@ pub struct Connection{
     pub seqn_fin_p2c: u32,
     /// latest seqn of FIN seen for proxy to server
     pub seqn_fin_p2s: u32,
-
 }
 
-impl  Connection {
+impl Connection {
     fn initialize(&mut self, client_sock: &(u32, u16), proxy_sport: u16) {
         //self.payload.clear();
         self.userdata = None;
@@ -158,7 +157,7 @@ pub static GLOBAL_MANAGER_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
 pub struct ConnectionManager {
     con_records_c: Vec<ConRecord>,
     con_records_s: Vec<ConRecord>,
-    sock2port: BTreeMap<(u32,u16), u16>,
+    sock2port: BTreeMap<(u32, u16), u16>,
     free_ports: VecDeque<u16>,
     port2con: Vec<Connection>,
     pci: CacheAligned<PortQueue>,
@@ -249,7 +248,7 @@ impl ConnectionManager {
             // we borrow sock2port here !
             let port = self.sock2port.get(sock);
             if port.is_some() {
-                let cc= &mut self.port2con[(port.unwrap() - self.tcp_port_base) as usize];
+                let cc = &mut self.port2con[(port.unwrap() - self.tcp_port_base) as usize];
                 assert_ne!(cc.port(), 0);
                 return Some(cc);
             }
@@ -264,7 +263,8 @@ impl ConnectionManager {
             debug!(
                 "rxq={}: tcp flow for socket ({},{}) created on {}:{:?}",
                 self.pci.rxq(),
-                sock.0, sock.1,
+                sock.0,
+                sock.1,
                 Ipv4Addr::from(self.ip),
                 port
             );
@@ -292,7 +292,7 @@ impl ConnectionManager {
                 }
             }
             c.set_port(0u16); // this indicates an unused connection,
-            // we keep unused connection in port2con table
+                              // we keep unused connection in port2con table
         }
     }
 
@@ -310,9 +310,11 @@ impl ConnectionManager {
                         break;
                     }
                 }
-                (None, more) => if !more {
-                    break;
-                },
+                (None, more) => {
+                    if !more {
+                        break;
+                    }
+                }
             }
         }
     }

@@ -106,7 +106,8 @@ pub fn main() {
     ctrlc::set_handler(move || {
         info!("received SIGINT or SIGTERM");
         r.store(false, Ordering::SeqCst);
-    }).expect("error setting Ctrl-C handler");
+    })
+    .expect("error setting Ctrl-C handler");
 
     let opts = basic_opts();
 
@@ -134,16 +135,18 @@ pub fn main() {
             port: srv_cfg.port,
             server_id: srv_cfg.id.clone(),
             index: i,
-        }).collect();
+        })
+        .collect();
 
-    let l234data_clone=l234data.clone();
+    let l234data_clone = l234data.clone();
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_select_server = move |c: &mut Connection| {
         //let cdata: CData = serde_json::from_slice(&c.payload).expect("cannot deserialize CData");
         //no_calls +=1;
-        let cdata: CData = bincode::deserialize::<CData>(c.payload_packet.as_ref().unwrap().get_payload()).expect("cannot deserialize CData");
+        let cdata: CData = bincode::deserialize::<CData>(c.payload_packet.as_ref().unwrap().get_payload())
+            .expect("cannot deserialize CData");
 
-        for (i,l234) in l234data_clone.iter().enumerate() {
+        for (i, l234) in l234data_clone.iter().enumerate() {
             if l234.port == cdata.reply_socket.port() && l234.ip == u32::from(*cdata.reply_socket.ip()) {
                 c.con_rec_s.server_index = i;
                 break;
@@ -244,7 +247,7 @@ pub fn main() {
                     Ok(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s, rx_tx_stats)) => {
                         print_tcp_counters(&pipeline_id, &tcp_counter_c, &tcp_counter_s);
                         #[cfg(feature = "profiling")]
-                            print_rx_tx_counters(&pipeline_id, &rx_tx_stats.unwrap());
+                        print_rx_tx_counters(&pipeline_id, &rx_tx_stats.unwrap());
                         tcp_counters_c.insert(pipeline_id.clone(), tcp_counter_c);
                         tcp_counters_s.insert(pipeline_id, tcp_counter_s);
                     }
