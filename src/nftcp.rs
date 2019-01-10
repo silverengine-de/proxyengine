@@ -138,24 +138,27 @@ pub fn setup_forwarder<F1, F2>(
         let tx_stats = pci.tx_stats();
     #[cfg(feature = "profiling")]
         let rx_stats = pci.rx_stats();
-    // process TCP traffic addressed to Proxy
+
+    #[cfg(feature = "profiling")]
+        let sample_size=4000 as u64;
     #[cfg(feature = "profiling")]
         let mut time_adders = [
-        TimeAdder::new("c_cmanager", 10000),
-        TimeAdder::new("s_cmanager", 10000),
-        TimeAdder::new("c_recv_syn", 4000),
-        TimeAdder::new("s_recv_syn_ack", 4000),
-        TimeAdder::new("c_recv_syn_ack2", 4000),
-        TimeAdder::new("c_recv_1_payload", 4000),
-        TimeAdder::new("c2s_stable", 4000),
-        TimeAdder::new("s2c_stable", 4000),
-        TimeAdder::new("c_recv_fin", 4000),
-        TimeAdder::new("s_recv_fin", 4000),
-        TimeAdder::new("c_release_con", 4000),
-        TimeAdder::new("s_release_con", 4000),
+        TimeAdder::new("c_cmanager_syn", sample_size*2),
+        TimeAdder::new("s_cmanager", sample_size*2),
+        TimeAdder::new("c_recv_syn", sample_size),
+        TimeAdder::new("s_recv_syn_ack", sample_size),
+        TimeAdder::new("c_recv_syn_ack2", sample_size),
+        TimeAdder::new("c_recv_1_payload", sample_size),
+        TimeAdder::new("c2s_stable", sample_size),
+        TimeAdder::new("s2c_stable", sample_size),
+        TimeAdder::new("c_cmanager_not_syn", sample_size),
+        TimeAdder::new("", sample_size),
+        TimeAdder::new("", sample_size),
+        TimeAdder::new("", sample_size),
     ];
 
     let group_by_closure =
+        // this is the main closure containing the proxy service logic
         box move |packet_in: &mut Packet<MacHeader, EmptyMetadata>| {
             // this is the major closure for TCP processing
             struct HeaderState<'a> {
@@ -584,12 +587,17 @@ pub fn setup_forwarder<F1, F2>(
                     if hs.tcp.dst_port() == me.l234.port {
                         //trace!("client to server");
                         let opt_c = if hs.tcp.syn_flag() {
-                            cm.get_mut_or_insert(&src_sock)
+                            let c=cm.get_mut_or_insert(&src_sock);
+                            #[cfg(feature = "profiling")]
+                                time_adders[0].add(utils::rdtsc_unsafe() - timestamp_entry);
+                            c
                         } else {
-                            cm.get_mut_by_sock(&src_sock)
+                            let c=cm.get_mut_by_sock(&src_sock);
+                            #[cfg(feature = "profiling")]
+                                time_adders[8].add(utils::rdtsc_unsafe() - timestamp_entry);
+                            c
                         };
-                        #[cfg(feature = "profiling")]
-                            time_adders[0].add(utils::rdtsc_unsafe() - timestamp_entry);
+
 
                         if opt_c.is_none() {
                             warn!("{} unexpected client side packet (seq={}): no state for socket ({}, {}), sending to KNI i/f", thread_id, hs.tcp.seq_num(), src_sock.0, src_sock.1);
