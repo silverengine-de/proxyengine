@@ -186,7 +186,6 @@ impl ConnectionManager {
         };
         // need to add last port this way to avoid overflow with slice, when max_tcp_port == 65535
         cm.free_ports.push_back(max_tcp_port);
-        //        cm.spawn_maintenance_thread();
         info!(
             "created ConnectionManager {} for port {}, rxq {}, ip= {}, tcp ports {} - {}",
             old_manager_count,
@@ -203,7 +202,8 @@ impl ConnectionManager {
     fn get_mut_con(&mut self, p: &u16) -> &mut Connection {
         &mut self.port2con[(p - self.tcp_port_base) as usize]
     }
-
+    
+    #[inline]
     fn owns_tcp_port(&self, tcp_port: u16) -> bool {
         tcp_port & self.pci.port.get_tcp_dst_port_mask() == self.tcp_port_base
     }
