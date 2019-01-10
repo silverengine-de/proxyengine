@@ -1,5 +1,5 @@
 use std::net::{Ipv4Addr};
-use std::collections::{VecDeque, BTreeMap};
+use std::collections::{VecDeque, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
 use std::fmt;
 use std::mem;
@@ -13,6 +13,7 @@ use uuid::Uuid;
 use netfcts::timer_wheel::TimerWheel;
 use netfcts::tcp_common::*;
 use netfcts::ConRecord;
+use netfcts::utils::shuffle_ports;
 
 pub struct Connection {
     //pub payload: Vec<u8>,
@@ -157,7 +158,7 @@ pub static GLOBAL_MANAGER_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
 pub struct ConnectionManager {
     con_records_c: Vec<ConRecord>,
     con_records_s: Vec<ConRecord>,
-    sock2port: BTreeMap<(u32, u16), u16>,
+    sock2port: HashMap<(u32, u16), u16>,
     free_ports: VecDeque<u16>,
     port2con: Vec<Connection>,
     pci: CacheAligned<PortQueue>,
@@ -177,9 +178,12 @@ impl ConnectionManager {
         let mut cm = ConnectionManager {
             con_records_c: Vec::with_capacity(MAX_CONNECTIONS),
             con_records_s: Vec::with_capacity(MAX_CONNECTIONS),
-            sock2port: BTreeMap::new(),
+            sock2port: HashMap::with_capacity(MAX_CONNECTIONS),
             port2con: vec![Connection::new(); !port_mask as usize + 1],
-            free_ports: ((if tcp_port_base == 0 { 1 } else { tcp_port_base })..max_tcp_port).collect(), // port 0 is reserved and not usable for us
+            free_ports: {
+                let vec = shuffle_ports(if tcp_port_base == 0 { 1 } else { tcp_port_base }, max_tcp_port - 1);
+                VecDeque::<u16>::from(vec)
+            }, // port 0 is reserved and not usable for us
             pci,
             tcp_port_base,
             ip,

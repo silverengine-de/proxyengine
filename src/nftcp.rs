@@ -29,7 +29,7 @@ use netfcts::tcp_common::*;
 use netfcts::tasks;
 use netfcts::tasks::private_etype;
 #[cfg(feature = "profiling")]
-use netfcts::TimeAdder;
+use netfcts::utils::TimeAdder;
 
 use EngineConfig;
 use {PipelineId, MessageFrom, MessageTo, TaskType};
@@ -143,7 +143,7 @@ pub fn setup_forwarder<F1, F2>(
         let sample_size=4000 as u64;
     #[cfg(feature = "profiling")]
         let mut time_adders = [
-        TimeAdder::new("c_cmanager_syn", sample_size*2),
+        TimeAdder::new("c_cmanager_syn", sample_size),
         TimeAdder::new("s_cmanager", sample_size*2),
         TimeAdder::new("c_recv_syn", sample_size),
         TimeAdder::new("s_recv_syn_ack", sample_size),
@@ -151,7 +151,7 @@ pub fn setup_forwarder<F1, F2>(
         TimeAdder::new("c_recv_1_payload", sample_size),
         TimeAdder::new("c2s_stable", sample_size),
         TimeAdder::new("s2c_stable", sample_size),
-        TimeAdder::new("c_cmanager_not_syn", sample_size),
+        TimeAdder::new("c_cmanager_not_syn", sample_size*2),
         TimeAdder::new("", sample_size),
         TimeAdder::new("", sample_size),
         TimeAdder::new("", sample_size),
