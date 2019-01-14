@@ -1,5 +1,5 @@
 use std::net::{Ipv4Addr};
-use std::collections::{VecDeque, HashMap};
+use std::collections::{VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
 use std::fmt;
 use std::mem;
@@ -14,6 +14,7 @@ use netfcts::timer_wheel::TimerWheel;
 use netfcts::tcp_common::*;
 use netfcts::ConRecord;
 use netfcts::utils::shuffle_ports;
+use netfcts::utils::Sock2Index;
 
 pub struct Connection {
     //pub payload: Vec<u8>,
@@ -158,7 +159,8 @@ pub static GLOBAL_MANAGER_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
 pub struct ConnectionManager {
     con_records_c: Vec<ConRecord>,
     con_records_s: Vec<ConRecord>,
-    sock2port: HashMap<(u32, u16), u16>,
+    sock2port: Sock2Index,
+    //sock2port: HashMap<(u32, u16), u16>,
     free_ports: VecDeque<u16>,
     port2con: Vec<Connection>,
     pci: CacheAligned<PortQueue>,
@@ -178,7 +180,8 @@ impl ConnectionManager {
         let mut cm = ConnectionManager {
             con_records_c: Vec::with_capacity(MAX_CONNECTIONS),
             con_records_s: Vec::with_capacity(MAX_CONNECTIONS),
-            sock2port: HashMap::with_capacity(MAX_CONNECTIONS),
+            // sock2port: HashMap::with_capacity(MAX_CONNECTIONS),
+            sock2port: Sock2Index::new(),
             port2con: vec![Connection::new(); !port_mask as usize + 1],
             free_ports: {
                 let vec = shuffle_ports(if tcp_port_base == 0 { 1 } else { tcp_port_base }, max_tcp_port - 1);
@@ -196,8 +199,8 @@ impl ConnectionManager {
             PacketRx::port_id(&cm.pci),
             cm.pci.rxq(),
             Ipv4Addr::from(ip),
-            cm.free_ports.front().unwrap(),
-            cm.free_ports.back().unwrap(),
+            if tcp_port_base == 0 { 1 } else { tcp_port_base },
+            max_tcp_port,
         );
         cm
     }
