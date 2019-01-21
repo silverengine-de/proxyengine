@@ -39,11 +39,11 @@ use netfcts::initialize_flowdirector;
 use netfcts::tcp_common::{ReleaseCause, TcpStatistics};
 use netfcts::system::{SystemData, get_mac_from_ifname};
 use netfcts::io::{ print_tcp_counters, print_rx_tx_counters};
+use netfcts::ConRecordOperations;
 
 use tcp_proxy::Connection;
 use tcp_proxy::{read_config};
 use tcp_proxy::setup_pipelines;
-use tcp_proxy::Container;
 use tcp_proxy::L234Data;
 use netfcts::comm::{MessageFrom, MessageTo};
 use tcp_proxy::spawn_recv_thread;
@@ -133,14 +133,8 @@ fn delayed_binding_proxy() {
         // read first item in string and convert to usize:
         let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
         let remainder = stars % l234data_clone.len();
-        c.con_rec_s.server_index = remainder;
+        c.s_mut().set_server_index(remainder);
         debug!("selecting {}", proxy_config_cloned.targets[remainder].id);
-        // initialize userdata
-        if let Some(_) = c.userdata {
-            c.userdata.as_mut().unwrap().init();
-        } else {
-            c.userdata = Some(Container::new());
-        }
     };
 
     // this is the closure, which may modify the payload of client to server packets in a TCP connection
@@ -309,9 +303,9 @@ fn delayed_binding_proxy() {
 
             let mut completed_count_c = 0;
             for (_p, (con_recs, _)) in &con_records {
-                for c in con_recs {
+                for c in con_recs.iter() {
                     if (c.get_release_cause() == ReleaseCause::PassiveClose || c.get_release_cause() == ReleaseCause::ActiveClose)
-                        && c.last_state() == &TcpState::Closed
+                        && c.last_state() == TcpState::Closed
                         {
                             completed_count_c += 1
                         };
@@ -320,9 +314,9 @@ fn delayed_binding_proxy() {
 
             let mut completed_count_s = 0;
             for (_p, (_, con_recs)) in &con_records{
-                for c in con_recs {
+                for c in con_recs.iter() {
                     if (c.get_release_cause() == ReleaseCause::PassiveClose || c.get_release_cause() == ReleaseCause::ActiveClose)
-                        && c.last_state() == &TcpState::Closed
+                        && c.last_state() == TcpState::Closed
                         {
                             completed_count_s += 1
                         };
@@ -346,15 +340,14 @@ fn delayed_binding_proxy() {
                 f.write_all(format!("Pipeline {}:\n", p).as_bytes()).expect("cannot write c_records");
                 // make HashMap with key uuid
                 let mut by_uuid = HashMap::with_capacity(c_records_s.len());
-                for c in c_records_s { by_uuid.insert(c.uuid.unwrap(), c.clone()); }
+                for c in c_records_s.iter() { by_uuid.insert(c.uid(), c.clone()); }
 
                 if c_records_c.len() > 0 {
                     let mut completed_count = 0;
                     let mut min = c_records_c.iter().last().unwrap().clone();
                     let mut max = min.clone();
                     c_records_c.iter().enumerate().for_each(|(i, c)| {
-                        let uuid=c.uuid.as_ref().unwrap();
-                        let c_server = by_uuid.remove(uuid);
+                        let c_server = by_uuid.remove(&c.uid());
                         let line = format!("{:6}: {}\n", i, c);
                         f.write_all(line.as_bytes()).expect("cannot write c_records");
                         if c_server.is_some() {
@@ -380,17 +373,19 @@ fn delayed_binding_proxy() {
                         tcp_counters_s.get(&p).unwrap()[TcpStatistics::RecvSynAck]
                     );
                     assert_eq!(
-                        tcp_counters_s.get(&p).unwrap()[TcpStatistics::RecvFin] + tcp_counters_s.get(&p).unwrap()[TcpStatistics::RecvFinAck],
-                        tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvFinAck] + tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvFin]
+                        tcp_counters_s.get(&p).unwrap()[TcpStatistics::RecvFin] + tcp_counters_s.get(&p).unwrap()[TcpStatistics::RecvFinPssv],
+                        tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvFinPssv] + tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvFin]
                     );
-                    assert_eq!(
-                        tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvFin],
-                        tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvFinAck2]
+                    assert!(
+                        tcp_counters_c.get(&p).unwrap()[TcpStatistics::SentFin] + tcp_counters_c.get(&p).unwrap()[TcpStatistics::SentFinPssv] <=
+                        tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvAck4Fin]
                     );
-                    assert_eq!(
-                        tcp_counters_s.get(&p).unwrap()[TcpStatistics::RecvFin],
-                        tcp_counters_s.get(&p).unwrap()[TcpStatistics::RecvFinAck2]
+                    assert!(
+                        tcp_counters_s.get(&p).unwrap()[TcpStatistics::SentFin] + tcp_counters_s.get(&p).unwrap()[TcpStatistics::SentFinPssv] <=
+                        tcp_counters_s.get(&p).unwrap()[TcpStatistics::RecvAck4Fin]
                     );
+                    assert_eq!(tcp_counters_s.get(&p).unwrap()[TcpStatistics::SentSyn], tcp_counters_s.get(&p).unwrap()[TcpStatistics::Payload]);
+                    assert_eq!(tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvSyn], tcp_counters_c.get(&p).unwrap()[TcpStatistics::Payload]);
                 }
             }
 

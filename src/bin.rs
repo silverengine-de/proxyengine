@@ -48,6 +48,7 @@ use netfcts::io::{ print_tcp_counters };
 #[cfg(feature = "profiling")]
 use netfcts::io::print_rx_tx_counters;
 use netfcts::system::get_mac_from_ifname;
+use netfcts::ConRecordOperations;
 
 use tcp_proxy::{read_config, setup_pipelines};
 use tcp_proxy::Connection;
@@ -148,7 +149,7 @@ pub fn main() {
 
         for (i, l234) in l234data_clone.iter().enumerate() {
             if l234.port == cdata.reply_socket.port() && l234.ip == u32::from(*cdata.reply_socket.ip()) {
-                c.con_rec_s.server_index = i;
+                c.s_mut().set_server_index(i);
                 break;
             }
         }
@@ -268,10 +269,10 @@ pub fn main() {
 
             let mut completed_count_c = 0;
             for (_p, (con_recs, _)) in &con_records {
-                for c in con_recs {
+                for c in con_recs.iter() {
                     if (c.get_release_cause() == ReleaseCause::PassiveClose
                         || c.get_release_cause() == ReleaseCause::ActiveClose)
-                        && c.last_state() == &TcpState::Closed
+                        && c.last_state() == TcpState::Closed
                     {
                         completed_count_c += 1
                     };
@@ -280,10 +281,10 @@ pub fn main() {
 
             let mut completed_count_s = 0;
             for (_p, (_, con_recs)) in &con_records {
-                for c in con_recs {
+                for c in con_recs.iter() {
                     if (c.get_release_cause() == ReleaseCause::PassiveClose
                         || c.get_release_cause() == ReleaseCause::ActiveClose)
-                        && c.last_state() == &TcpState::Closed
+                        && c.last_state() == TcpState::Closed
                     {
                         completed_count_s += 1
                     };
@@ -304,8 +305,8 @@ pub fn main() {
                     .expect("cannot write c_records");
                 // make HashMap with key uuid
                 let mut by_uuid = HashMap::with_capacity(c_records_s.len());
-                for c in c_records_s {
-                    by_uuid.insert(c.uuid.unwrap(), c.clone());
+                for c in c_records_s.iter() {
+                    by_uuid.insert(c.uid(), c.clone());
                 }
 
                 if c_records_c.len() > 0 {
@@ -315,8 +316,7 @@ pub fn main() {
                     c_records_c.sort_by(|a, b| a.sock.unwrap().1.cmp(&b.sock.unwrap().1));
 
                     c_records_c.iter().enumerate().for_each(|(i, c)| {
-                        let uuid = c.uuid.as_ref().unwrap();
-                        let c_server = by_uuid.remove(uuid);
+                        let c_server = by_uuid.remove(&c.uid());
                         let line = format!("{:6}: {}\n", i, c);
                         f.write_all(line.as_bytes()).expect("cannot write c_records");
                         f.write_all(format!("        {}\n", c_server.unwrap()).as_bytes())

@@ -37,10 +37,10 @@ use netfcts::initialize_flowdirector;
 use netfcts::tcp_common::ReleaseCause;
 use netfcts::system::{SystemData, get_mac_from_ifname};
 use netfcts::io::{ print_tcp_counters, print_rx_tx_counters};
+use netfcts::ConRecordOperations;
 
 use tcp_proxy::Connection;
 use tcp_proxy::{read_config};
-use tcp_proxy::Container;
 use tcp_proxy::L234Data;
 use netfcts::comm::{MessageFrom, MessageTo};
 use tcp_proxy::spawn_recv_thread;
@@ -130,14 +130,8 @@ fn delayed_binding_proxy() {
         // read first item in string and convert to usize:
         let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
         let remainder = stars % l234data_clone.len();
-        c.con_rec_s.server_index = remainder;
+        c.s_mut().set_server_index(remainder);
         debug!("selecting {}", proxy_config_cloned.targets[remainder].id);
-        // initialize userdata
-        if let Some(_) = c.userdata {
-            c.userdata.as_mut().unwrap().init();
-        } else {
-            c.userdata = Some(Container::new());
-        }
     };
 
     // this is the closure, which may modify the payload of client to server packets in a TCP connection
@@ -280,9 +274,9 @@ fn delayed_binding_proxy() {
 
             let mut completed_count_c = 0;
             for (_p, (con_recs, _)) in &con_records {
-                for c in con_recs {
+                for c in con_recs.iter() {
                     if c.get_release_cause() == ReleaseCause::ActiveClose
-                        && c.last_state() == &TcpState::Closed
+                        && c.last_state() == TcpState::Closed
                         {
                             completed_count_c += 1
                         };
@@ -293,9 +287,9 @@ fn delayed_binding_proxy() {
 
             let mut completed_count_s = 0;
             for (_p, (_, con_recs)) in &con_records{
-                for c in con_recs {
+                for c in con_recs.iter() {
                     if c.get_release_cause() == ReleaseCause::PassiveClose
-                        && c.last_state() == &TcpState::Closed
+                        && c.last_state() == TcpState::Closed
                         {
                             completed_count_s += 1
                         };

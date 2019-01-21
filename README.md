@@ -1,4 +1,4 @@
-_**ProxyEngine Overview**_
+#### ProxyEngine Overview
 
 ProxyEngine is a user-space TCP-proxy written in Rust with following properties
 * TCP pass-through
@@ -9,13 +9,28 @@ ProxyEngine is a user-space TCP-proxy written in Rust with following properties
 
 It may be used for intelligent load-balancing and fire-walling of TCP based protocols, e.g. LDAP. Late binding allows to select the target server not till the first payload packet after the initial three-way hand-shake is received. In addition callbacks can be defined by which the proxy can modify the payload of the TCP based protocol. For this purpose additional connection state is maintained by the ProxyEngine.
 
-First benchmarking shows that ProxyEngine can forward about 1.3 million packets per second per physical core (of a rather old 4 core L5520 CPU @ 2.27GHz with 32K/256K/8192K L1/L2/L3 Cache). Do not forget to compile with --release flag for any benchmarking ;-)
+First benchmarking shows that ProxyEngine can handle about 200,000 connections per second (cps) per core. Each connection exchanges seven packets between client and server.
 
 Scaling happens by distributing incoming client-side TCP connections using RSS over the cores and by steering the incoming server side TCP connections to the appropriate core. This receive flow steering can be either based on the port or on the IP address of the server side connection (selected by parameter _flow_steering_ in the toml configuration file). In the first case port resources of the proxy are assigned to cores (based on paramater _dst_port_mask_ in the configuration file). In the second case each core uses a unique IP address for the server side connections.     
 
-ProxyEngine builds on [Netbricks](https://github.com/NetSys/NetBricks) which itself utilizes DPDK for user-space networking.
+#### Architecture and Implementation
 
-_**ProxyEngine Installation**_
+ProxyEngine builds on a fork of [Netbricks](https://github.com/NetSys/NetBricks) for the user-space networking. 
+NetBricks itself utilizes _DPDK_ for fast I/O. 
+NetBricks uses a significantly higher abstraction level than _DPDK_. 
+This allows for quick and straight forward implementation of complex network functions by placing basic functions like packet filters and flow splitters and mergers into a directed graph.
+A very similar approach is followed by the [NFF-Go](https://github.com/intel-go/nff-go) project.
+
+Some additionally implemented features of ProxyEngine are:
+* utilization of Flow Director feature in Intel NICs to implement RSS and RFS (tested with 82599 and X710 NICs)
+* zero-copy recording of session records including time-stamps for TCP state changes 
+* timer wheels for scheduling and processing of timer events (e.g. for TCP timeouts)
+* queue length dependent scheduling of tasks
+* queue length dependent merging of flows
+* code profiling feature for performance tuning
+* HW and SW based check sums      
+
+#### ProxyEngine Installation
 
 First install NetBricks. ProxyEngine needs the branch e2d2-rstade from the fork at https://github.com/rstade/Netbricks. The required NetBricks version is tagged (starting with v0.2.0). Install NetBricks locally on your (virtual) machine by following the description of NetBricks. The (relative) installation path of e2d2 needs to be updated in the dependency section of Cargo.toml for the ProxyEngine. 
 
@@ -33,11 +48,11 @@ For running the tests both interfaces must be interconnected with a cross over c
 
 In addition some parameters like the Linux interface name (linux_if), the PCI slot id and the IP / MAC addresses in the test module configuration files  tests/*.toml need to be adapted. 
 
-Latest code of ProxyEngine was tested on two different 2-socket NUMA servers, each socket hosting 4, respectively 6 physical cores, running realtime kernel of Centos 7.5. The benchmarking mentioned above was done with this two servers, one running iperf3 client and server instances, the other running the ProxyEngine as the device under test (DUT).
+Latest code of ProxyEngine was tested on two different 2-socket NUMA servers, each socket hosting 4, respectively 6 physical cores, running realtime kernel of Centos 7.5.
 
 A recent performance test using [TrafficEngine](https://github.com/rstade/TrafficEngine) as traffic generator achieves ~200000 connections per second (cps) on a single core of a six-core E5-2640 with 2.50 GHz.
 
 
-_**ProxyEngine Software Test Configuration**_
+#### ProxyEngine Test Configuration
 
 ![proxyengine test configuration](https://github.com/silverengine-de/proxyengine/blob/master/proxyengine_config.png)

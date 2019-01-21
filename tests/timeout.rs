@@ -33,11 +33,11 @@ use netfcts::initialize_flowdirector;
 use netfcts::tcp_common::ReleaseCause;
 use netfcts::comm::{ MessageFrom, MessageTo };
 use netfcts::system::{SystemData, get_mac_from_ifname};
+use netfcts::ConRecordOperations;
 
 use tcp_proxy::Connection;
 use tcp_proxy::{read_config, };
 use tcp_proxy::setup_pipelines;
-use tcp_proxy::Container;
 use tcp_proxy::L234Data;
 use tcp_proxy::spawn_recv_thread;
 
@@ -125,14 +125,8 @@ fn delayed_binding_proxy() {
         // read first item in string and convert to usize:
         let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
         let remainder = stars % l234data_clone.len();
-        c.con_rec_s.server_index = remainder;
+        c.s_mut().set_server_index(remainder);
         info!("selecting {}", proxy_config_cloned.targets[remainder].id);
-        // initialize userdata
-        if let Some(_) = c.userdata {
-            c.userdata.as_mut().unwrap().init();
-        } else {
-            c.userdata = Some(Container::new());
-        }
     };
 
     // this is the closure, which may modify the payload of client to server packets in a TCP connection
@@ -225,7 +219,7 @@ fn delayed_binding_proxy() {
                 Ok(MessageTo::CRecords(_pipeline_id, con_records_c, _con_records_s)) => {
                     assert_eq!(con_records_c.len(), configuration.test_size.unwrap() * CLIENT_THREADS);
                     let mut timeouts =0;
-                    for c in &con_records_c {
+                    for c in con_records_c.iter() {
                         debug!("{}", c);
                         if c.get_release_cause() == ReleaseCause::Timeout {
                             timeouts +=1;
