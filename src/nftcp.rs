@@ -39,6 +39,10 @@ use is_kni_core;
 
 const MIN_FRAME_SIZE: usize = 60; // without fcs
 
+const TIMER_WHEEL_RESOLUTION_MS: u64 = 10;
+const TIMER_WHEEL_SLOTS: usize = 1001;
+const TIMER_WHEEL_SLOT_CAPACITY: usize = 2500;
+
 pub fn setup_forwarder<F1, F2>(
     core: i32,
     pci: &CacheAligned<PortQueue>,
@@ -79,8 +83,22 @@ pub fn setup_forwarder<F1, F2>(
 
     let mut cm: ConnectionManager = ConnectionManager::new(pci.clone(), l4flow_for_this_core);
 
-    let timeouts = Timeouts::default_or_some(&engine_config.timeouts);
-    let mut wheel = TimerWheel::new(1000, system_data.cpu_clock / 100, 2500);
+    let mut timeouts = Timeouts::default_or_some(&engine_config.timeouts);
+    let mut wheel = TimerWheel::new(
+        TIMER_WHEEL_SLOTS,
+        system_data.cpu_clock * TIMER_WHEEL_RESOLUTION_MS / 1000,
+        TIMER_WHEEL_SLOT_CAPACITY,
+    );
+
+    // check that we do not overflow the wheel:
+    if timeouts.established.is_some() {
+        let timeout=timeouts.established.unwrap();
+        if timeout > wheel.get_max_timeout_cycles() {
+            warn!("timeout defined in configuration file overflows timer wheel: reset to {} millis",
+                   wheel.get_max_timeout_cycles() * 1000 / system_data.cpu_clock);
+            timeouts.established= Some(wheel.get_max_timeout_cycles());
+        }
+    }
 
     // we need this queue for the delayed bindrequest
     let (producer, consumer) = new_mpsc_queue_pair();
@@ -108,7 +126,7 @@ pub fn setup_forwarder<F1, F2>(
     let mut counter_c = TcpCounter::new();
     let mut counter_s = TcpCounter::new();
     #[cfg(feature = "profiling")]
-    let mut rx_tx_stats = Vec::with_capacity(10000);
+        let mut rx_tx_stats = Vec::with_capacity(10000);
 
     // set up the generator producing timer tick packets with our private EtherType
     let (producer_timerticks, consumer_timerticks) = new_mpsc_queue_pair();
@@ -122,7 +140,7 @@ pub fn setup_forwarder<F1, F2>(
         uuid_tick_generator,
         TaskType::TickGenerator,
     ))
-    .unwrap();
+        .unwrap();
 
     let receive_pci = ReceiveBatch::new(pci.clone());
     let l2_input_stream = merge_auto(
@@ -136,27 +154,31 @@ pub fn setup_forwarder<F1, F2>(
     let csum_offload = pci.port.csum_offload();
     let uuid_l4groupby = Uuid::new_v4();
     #[cfg(feature = "profiling")]
-    let tx_stats = pci.tx_stats();
+        let tx_stats = pci.tx_stats();
     #[cfg(feature = "profiling")]
-    let rx_stats = pci.rx_stats();
+        let rx_stats = pci.rx_stats();
 
     #[cfg(feature = "profiling")]
-    let sample_size = 4000 as u64;
+    let mut time_adders;
     #[cfg(feature = "profiling")]
-    let mut time_adders = [
-        TimeAdder::new("c_cmanager_syn", sample_size),
-        TimeAdder::new("s_cmanager", sample_size * 2),
-        TimeAdder::new("c_recv_syn", sample_size),
-        TimeAdder::new("s_recv_syn_ack", sample_size),
-        TimeAdder::new("c_recv_syn_ack2", sample_size),
-        TimeAdder::new("c_recv_1_payload", sample_size),
-        TimeAdder::new("c2s_stable", sample_size),
-        TimeAdder::new("s2c_stable", sample_size),
-        TimeAdder::new("c_cmanager_not_syn", sample_size * 2),
-        TimeAdder::new("", sample_size),
-        TimeAdder::new("", sample_size),
-        TimeAdder::new("", sample_size),
-    ];
+        {
+            let sample_size = 4000 as u64;
+            let warm_up = 100 as u64;
+            time_adders = [
+                TimeAdder::new_with_warm_up("c_cmanager_syn", sample_size, warm_up),
+                TimeAdder::new_with_warm_up("s_cmanager", sample_size * 2, warm_up),
+                TimeAdder::new_with_warm_up("c_recv_syn", sample_size, warm_up),
+                TimeAdder::new_with_warm_up("s_recv_syn_ack", sample_size, warm_up),
+                TimeAdder::new_with_warm_up("c_recv_syn_ack2", sample_size, warm_up),
+                TimeAdder::new_with_warm_up("c_recv_1_payload", sample_size, warm_up),
+                TimeAdder::new_with_warm_up("c2s_stable", sample_size, warm_up),
+                TimeAdder::new_with_warm_up("s2c_stable", sample_size, warm_up),
+                TimeAdder::new_with_warm_up("c_cmanager_not_syn", sample_size * 2, warm_up),
+                TimeAdder::new_with_warm_up("", sample_size, warm_up),
+                TimeAdder::new_with_warm_up("", sample_size, warm_up),
+                TimeAdder::new_with_warm_up("", sample_size, warm_up),
+            ];
+        }
 
     let group_by_closure =
         // this is the main closure containing the proxy service logic
@@ -587,12 +609,12 @@ pub fn setup_forwarder<F1, F2>(
                     if hs.tcp.dst_port() == me.l234.port {
                         //trace!("client to server");
                         let opt_c = if hs.tcp.syn_flag() {
-                            let c=cm.get_mut_or_insert(&src_sock);
+                            let c = cm.get_mut_or_insert(&src_sock);
                             #[cfg(feature = "profiling")]
                                 time_adders[0].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                             c
                         } else {
-                            let c=cm.get_mut_by_sock(&src_sock);
+                            let c = cm.get_mut_by_sock(&src_sock);
                             #[cfg(feature = "profiling")]
                                 time_adders[8].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                             c

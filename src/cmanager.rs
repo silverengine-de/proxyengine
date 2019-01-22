@@ -57,6 +57,7 @@ pub struct Selector {
 }
 
 impl Selector {
+    #[inline]
     fn allocate_conrecs(&mut self) {
         self.con_rec = [
             Some(self.record_stores[0].as_ref().unwrap().borrow_mut().get_unused_slot()),
@@ -280,7 +281,7 @@ impl ConnectionManager {
             record_store: [store_c.clone(), store_s.clone()],
             sock2port: Sock2Index::new(),
             #[cfg(feature = "profiling")]
-            time_adder: TimeAdder::new("cm_get_mut_or_insert", 4000),
+            time_adder: TimeAdder::new_with_warm_up("connection initialize", 4000, 100),
             port2con: vec![Connection::new(); !port_mask as usize + 1],
             free_ports: {
                 let vec = shuffle_ports(if tcp_port_base == 0 { 1 } else { tcp_port_base }, max_tcp_port - 1);
@@ -348,16 +349,13 @@ impl ConnectionManager {
     }
 
     pub fn get_mut_or_insert(&mut self, sock: &(u32, u16)) -> Option<&mut Connection> {
-        #[cfg(feature = "profiling")]
-        let timestamp_entry = utils::rdtscp_unsafe();
+
         {
             // we borrow sock2port here !
             let port = self.sock2port.get(sock);
             if port.is_some() {
                 let cc = &mut self.port2con[(port.unwrap() - self.tcp_port_base) as usize];
                 assert_ne!(cc.port(), 0);
-                #[cfg(feature = "profiling")]
-                self.time_adder.add_diff(utils::rdtscp_unsafe() - timestamp_entry);
                 return Some(cc);
             }
         }
@@ -367,11 +365,17 @@ impl ConnectionManager {
             let port = opt_port.unwrap();
             let cc = &mut self.port2con[(port - self.tcp_port_base) as usize];
 
+            #[cfg(feature = "profiling")]
+                let timestamp_entry = utils::rdtscp_unsafe();
+
             cc.initialize(
                 sock,
                 port,
                 [Some(Rc::clone(&self.record_store[0])), Some(Rc::clone(&self.record_store[1]))],
             );
+
+            #[cfg(feature = "profiling")]
+                self.time_adder.add_diff(utils::rdtscp_unsafe() - timestamp_entry);
 
             debug!(
                 "rxq={}: tcp flow for socket ({},{}) created on {}:{:?}",
@@ -382,8 +386,7 @@ impl ConnectionManager {
                 port
             );
             self.sock2port.insert(*sock, port);
-            #[cfg(feature = "profiling")]
-            self.time_adder.add_diff(utils::rdtscp_unsafe() - timestamp_entry);
+
             Some(cc)
         } else {
             warn!("out of ports");

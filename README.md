@@ -18,17 +18,20 @@ Scaling happens by distributing incoming client-side TCP connections using RSS o
 ProxyEngine builds on a fork of [Netbricks](https://github.com/NetSys/NetBricks) for the user-space networking. 
 NetBricks itself utilizes _DPDK_ for fast I/O. 
 NetBricks uses a significantly higher abstraction level than _DPDK_. 
-This allows for quick and straight forward implementation of complex network functions by placing basic functions like packet filters and flow splitters and mergers into a directed graph.
-A very similar approach is followed by the [NFF-Go](https://github.com/intel-go/nff-go) project.
+This allows for quick and straight forward implementation of complex network functions by placing building blocks like packet filters and generators, flow splitters and mergers into a directed graph.
+As all functions in the graph operate in the same memory space there is neither the need to copy memory (zero copy approach) nor the need to move packets between functions. 
+This optimizes overall energy consumption and performance.
+This is in obvious contrast to classical network function virtualization (NFV) concept using e.g. virtual machines to implement network functions.
+A very similar approach is followed by the [NFF-Go](https://github.com/intel-go/nff-go) project. 
 
-Some additionally implemented features of ProxyEngine are:
-* utilization of Flow Director feature in Intel NICs to implement RSS and RFS (tested with 82599 and X710 NICs)
+Some specific features of ProxyEngine are:
+* using Flow Director capabilities in Intel NICs to implement RSS and RFS (tested with 82599 and X710 NICs)
 * zero-copy recording of session records including time-stamps for TCP state changes 
 * timer wheels for scheduling and processing of timer events (e.g. for TCP timeouts)
-* queue length dependent scheduling of tasks
-* queue length dependent merging of flows
+* load and priority dependent scheduling of flow processing (e.g. for flow merging)
 * code profiling feature for performance tuning
-* HW and SW based check sums      
+* secure multi-threading code based on Rust's borrow checker for memory isolation
+* easy integration of C libraries with support by automatic binding [rust-bindgen](https://github.com/rust-lang/rust-bindgen)    
 
 #### ProxyEngine Installation
 
