@@ -23,7 +23,7 @@ use netfcts::utils::Sock2Index;
 use netfcts::utils::TimeAdder;
 
 pub struct Connection {
-    pub payload_packet: Option<Packet<TcpHeader, EmptyMetadata>>,
+    pub payload_packet: Option<Box<Packet<TcpHeader, EmptyMetadata>>>,
     //Box makes the trait object sizeable
     ///can be used by applications to store application specific connection state
     pub userdata: Option<Box<UserData>>,

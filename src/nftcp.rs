@@ -399,7 +399,7 @@ pub fn setup_forwarder<F1, F2>(
                 F: Fn(&mut Connection),
             {
                 // save clone of payload packet to connection state
-                let p_clone = p.clone(); // creates reference to the mbuf in p
+                let p_clone = Box::new(p.clone()); // creates reference to the mbuf in p
                 let payload_sz = tcp_payload_size(&p_clone);
                 c.payload_packet = Some(p_clone);
                 f_select_server(c);
@@ -494,7 +494,7 @@ pub fn setup_forwarder<F1, F2>(
                     c.ackn_p2s = h.tcp.ack_num();
                     trace!("delayed packet: { }", payload_packet.get_header());
                     assert_eq!(payload_packet.refcnt(), 1);
-                    producer.enqueue_one(payload_packet);
+                    producer.enqueue_one_boxed(payload_packet);
                 }
             }
 
