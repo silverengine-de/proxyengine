@@ -19,10 +19,14 @@ ProxyEngine builds on a fork of [Netbricks](https://github.com/NetSys/NetBricks)
 NetBricks itself utilizes _DPDK_ for fast I/O. 
 NetBricks uses a significantly higher abstraction level than _DPDK_. 
 This allows for quick and straight forward implementation of complex network functions by placing building blocks like packet filters and generators, flow splitters and mergers into a directed graph.
-As all functions in the graph operate in the same memory space there is neither the need to copy memory (zero copy approach) nor the need to move packets between functions. 
+As all functions in the graph operate in the same memory space there is no need to copy memory (zero copy approach), or even worse to move packets between VNFs. 
 This optimizes overall energy consumption and performance.
-This is in obvious contrast to classical network function virtualization (NFV) concept using e.g. virtual machines to implement network functions.
-A very similar approach is followed by the [NFF-Go](https://github.com/intel-go/nff-go) project. 
+This is in obvious contrast to classical network function virtualization (NFV) concept using e.g. virtual machines to implement network functions (VNFs).
+A very similar zero copy approach is currently followed by the Intel [NFF-Go](https://github.com/intel-go/nff-go) project.
+
+We are using the above concept of NetBricks to implement a rather complex network function, namely a pass-through TCP proxy with delayed binding. 
+The network function itself (nftcp.rs) encompasses only ~700 LOC.
+This number includes already a significant amount of code for profiling, recording of TCP sessions, debugging and tracing.
 
 Some specific features of ProxyEngine are:
 * using Flow Director capabilities in Intel NICs to implement RSS and RFS (tested with 82599 and X710 NICs)

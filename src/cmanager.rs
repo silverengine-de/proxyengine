@@ -6,7 +6,7 @@ use std::mem;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use e2d2::headers::{MacHeader, TcpHeader};
+use e2d2::headers::{TcpHeader};
 use e2d2::allocators::CacheAligned;
 use e2d2::interface::{PacketRx, PortQueue, L4Flow, Packet};
 use e2d2::common::EmptyMetadata;
@@ -22,12 +22,14 @@ use netfcts::utils::Sock2Index;
 #[cfg(feature = "profiling")]
 use netfcts::utils::TimeAdder;
 
+use eui48::MacAddress;
+
 pub struct Connection {
     pub payload_packet: Option<Box<Packet<TcpHeader, EmptyMetadata>>>,
     //Box makes the trait object sizeable
     ///can be used by applications to store application specific connection state
     pub userdata: Option<Box<UserData>>,
-    pub client_mac: MacHeader,
+    pub client_mac: MacAddress,
     pub wheel_slot_and_index: (u16, u16),
     /// a helper construct to access either connection record for client or server side, see also c() and s() below
     selector: Selector,
@@ -93,7 +95,7 @@ impl Connection {
     #[inline]
     fn initialize(&mut self, client_sock: &(u32, u16), proxy_sport: u16, stores: [Option<Rc<RefCell<RecordStore>>>; 2]) {
         self.userdata = None;
-        self.client_mac = MacHeader::default();
+        self.client_mac = MacAddress::default();
         self.c_seqn = 0;
         self.f_seqn = 0;
         self.ackn_p2s = 0;
@@ -122,7 +124,7 @@ impl Connection {
         Connection {
             payload_packet: None,
             userdata: None,
-            client_mac: MacHeader::default(),
+            client_mac: MacAddress::default(),
             c_seqn: 0,
             ackn_p2s: 0,
             ackn_p2c: 0,
@@ -349,7 +351,6 @@ impl ConnectionManager {
     }
 
     pub fn get_mut_or_insert(&mut self, sock: &(u32, u16)) -> Option<&mut Connection> {
-
         {
             // we borrow sock2port here !
             let port = self.sock2port.get(sock);
@@ -366,7 +367,7 @@ impl ConnectionManager {
             let cc = &mut self.port2con[(port - self.tcp_port_base) as usize];
 
             #[cfg(feature = "profiling")]
-                let timestamp_entry = utils::rdtscp_unsafe();
+            let timestamp_entry = utils::rdtscp_unsafe();
 
             cc.initialize(
                 sock,
@@ -375,7 +376,7 @@ impl ConnectionManager {
             );
 
             #[cfg(feature = "profiling")]
-                self.time_adder.add_diff(utils::rdtscp_unsafe() - timestamp_entry);
+            self.time_adder.add_diff(utils::rdtscp_unsafe() - timestamp_entry);
 
             debug!(
                 "rxq={}: tcp flow for socket ({},{}) created on {}:{:?}",
