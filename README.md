@@ -57,9 +57,18 @@ In addition some parameters like the Linux interface name (linux_if), the PCI sl
 
 Latest code of ProxyEngine was tested on two different 2-socket NUMA servers, each socket hosting 4, respectively 6 physical cores, running realtime kernel of Centos 7.5.
 
-A recent performance test using [TrafficEngine](https://github.com/rstade/TrafficEngine) as traffic generator achieves ~200000 connections per second (cps) on a single core of a six-core E5-2640 with 2.50 GHz.
-
 
 #### ProxyEngine Test Configuration
 
 ![proxyengine test configuration](https://github.com/silverengine-de/proxyengine/blob/master/proxyengine_config.png)
+
+
+#### CPS Performance Test
+
+A recent performance test using [TrafficEngine](https://github.com/rstade/TrafficEngine) as traffic generator on a second server achieves ~230,000 connections per second (cps) 
+on a single core of a six-core E5-2640 with 2.50 GHz. Each connection comprises three packets each for connection setup and release and one additional payload packet (seven packets in total). 
+In this test we have therefore a high cps but a rather low number of packets per connection. In consequence this test stresses the processor cache and performance is determined by the cache coherence which can be achieved. 
+Therefore adding cores does not necessarily increase linearly the cps performance. Thus with a second core we 'only' achieve ~320,000 cps.
+
+A test with a more realistic traffic mix is currently planned.
+
