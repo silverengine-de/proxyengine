@@ -70,5 +70,10 @@ on a single core of a six-core E5-2640 with 2.50 GHz. Each connection comprises 
 In this test we have therefore a high cps but a rather low number of packets per connection. In consequence this test stresses the processor cache and performance is determined by the cache coherence which can be achieved. 
 Therefore adding cores does not necessarily increase linearly the cps performance. Thus with a second core we 'only' achieve ~320,000 cps.
 
+Tests were run on a two socket server with two 6 core E5-2640 @ 2.5GHz each with 32K/256K/15M L1/L2/L3 Cache and a recent Centos 7.5 real-time kernel,
+ e.g. from repository: http://linuxsoft.cern.ch/cern/centos/7/rt/CentOS-RT.repo. 
+ We also performed the basic tuning steps to isolate the cores which are running our working threads. 
+ The real-time kernel increases determinism significantly versus the usual Centos non-real-time kernel. For more information see [rt-tuning.md](https://github.com/rstade/TrafficEngine/blob/master/rt-tuning.md).
+
 A test with a more realistic traffic mix is currently planned.
 
