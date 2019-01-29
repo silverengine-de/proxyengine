@@ -39,7 +39,7 @@ use tcp_proxy::Connection;
 use tcp_proxy::{read_config, };
 use tcp_proxy::setup_pipelines;
 use tcp_proxy::spawn_recv_thread;
-use tcp_proxy::ProxyRecord;
+use tcp_proxy::ProxyRecStore;
 
 #[test]
 fn delayed_binding_proxy() {
@@ -142,8 +142,8 @@ fn delayed_binding_proxy() {
                 &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap(),
             );
             context.start_schedulers();
-            let (mtx, mrx) = channel::<MessageFrom<ProxyRecord>>();
-            let (reply_mtx, reply_mrx) = channel::<MessageTo<ProxyRecord>>();
+            let (mtx, mrx) = channel::<MessageFrom<ProxyRecStore>>();
+            let (reply_mtx, reply_mrx) = channel::<MessageTo<ProxyRecStore>>();
 
             let proxy_config_cloned = configuration.clone();
             let system_data_cloned = system_data.clone();
@@ -225,7 +225,7 @@ fn delayed_binding_proxy() {
                 Ok(MessageTo::CRecords(_pipeline_id, Some(con_records), _)) => {
                     assert_eq!(con_records.len(), configuration.test_size.unwrap() * CLIENT_THREADS);
                     let mut timeouts = 0;
-                    for c in con_records.iter() {
+                    for c in con_records.iter_0() {
                         debug!("{}", c);
                         if c.release_cause() == ReleaseCause::Timeout {
                             timeouts += 1;

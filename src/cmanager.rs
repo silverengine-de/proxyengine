@@ -15,8 +15,8 @@ use e2d2::utils;
 //use uuid::Uuid;
 use netfcts::timer_wheel::TimerWheel;
 use netfcts::tcp_common::*;
-use netfcts::RecordStore;
-use netfcts::{ConRecordOperations, ExtendedConRecord, Storable };
+use netfcts::Store64;
+use netfcts::{ConRecordOperations, Storable};
 use netfcts::TIME_STAMP_REDUCTION_FACTOR;
 use netfcts::utils::shuffle_ports;
 use netfcts::utils::Sock2Index;
@@ -25,8 +25,7 @@ use netfcts::utils::TimeAdder;
 
 use eui48::MacAddress;
 
-pub type ProxyRecord = ExtendedConRecord<Extension>;
-type ProxyRecStore = RecordStore<ProxyRecord>;
+pub type ProxyRecStore = Store64<Extension>;
 
 #[derive(Clone, Copy, Debug)]
 #[repr(align(32))]
@@ -39,7 +38,7 @@ pub struct Extension {
 
 impl Extension {
     #[inline]
-    fn states(&self) -> Vec<TcpState> {
+    pub fn states(&self) -> Vec<TcpState> {
         let mut result = vec![TcpState::Listen; self.s_state_count as usize];
         for i in 0..self.s_state_count as usize {
             result[i] = TcpState::from(self.s_state[i]);
@@ -48,7 +47,15 @@ impl Extension {
     }
 
     #[inline]
-    fn release_cause(&self) -> ReleaseCause {
+    fn push_state(&mut self, state: TcpState, base_stamp: u64) {
+        self.s_state[self.s_state_count as usize] = state as u8;
+        self.s_stamps[self.s_state_count as usize - 1] =
+            ((utils::rdtsc_unsafe() - base_stamp) / TIME_STAMP_REDUCTION_FACTOR) as u32;
+        self.s_state_count += 1;
+    }
+
+    #[inline]
+    pub fn release_cause(&self) -> ReleaseCause {
         ReleaseCause::from(self.s_release_cause)
     }
 
@@ -60,6 +67,10 @@ impl Extension {
     fn init(&mut self) {
         self.s_state[0] = TcpState::Listen as u8;
         self.s_state_count = 1;
+    }
+
+    pub fn last_state(&self) -> TcpState {
+        TcpState::from(self.s_state[self.s_state_count as usize - 1])
     }
 }
 
@@ -76,92 +87,7 @@ impl Storable for Extension {
 
 impl fmt::Display for Extension {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "({:?}, {:?})", self.states(), self.release_cause(), )
-    }
-}
-
-/// we use this trait in addition to HasTcpState as the tcp proxy has to track client and server tcp state in a single connection
-pub trait HasTcpState2 {
-    fn push_state2(&mut self, state: TcpState);
-    fn last_state2(&self) -> TcpState;
-    fn states2(&self) -> Vec<TcpState>;
-    fn get_last_stamp2(&self) -> Option<u64>;
-    fn get_first_stamp2(&self) -> Option<u64>;
-    fn deltas_to_base_stamp2(&self) -> Vec<u32>;
-    fn release_cause2(&self) -> ReleaseCause;
-    fn set_release_cause2(&mut self, cause: ReleaseCause);
-}
-
-impl HasTcpState2 for ProxyRecord {
-    #[inline]
-    fn push_state2(&mut self, state: TcpState) {
-        let count = self.extension().s_state_count as usize;
-        self.extension_mut().s_state[count] = state as u8;
-        self.extension_mut().s_stamps[count - 1] =
-            ((utils::rdtsc_unsafe() - self.con_record().base_stamp()) / TIME_STAMP_REDUCTION_FACTOR) as u32;
-        self.extension_mut().s_state_count += 1;
-    }
-
-    #[inline]
-    fn last_state2(&self) -> TcpState {
-        TcpState::from(self.extension().s_state[self.extension().s_state_count as usize - 1])
-    }
-
-    #[inline]
-    fn states2(&self) -> Vec<TcpState> {
-        let count = self.extension().s_state_count as usize;
-        let mut result = vec![TcpState::Listen; count];
-        for i in 0..count {
-            result[i] = TcpState::from(self.extension().s_state[i]);
-        }
-        result
-    }
-
-    #[inline]
-    fn get_last_stamp2(&self) -> Option<u64> {
-        match self.extension().s_state_count {
-            0 | 1 => None,
-            _ => Some(
-                self.con_record().base_stamp()
-                    + self.extension().s_stamps[self.extension().s_state_count as usize - 2] as u64
-                    * TIME_STAMP_REDUCTION_FACTOR,
-            ),
-        }
-    }
-
-    #[inline]
-    fn get_first_stamp2(&self) -> Option<u64> {
-        if self.extension().s_state_count > 1 {
-            Some(
-                self.con_record().base_stamp()
-                    + self.extension().s_stamps[0] as u64
-                    * TIME_STAMP_REDUCTION_FACTOR,
-            )
-        } else {
-            None
-        }
-    }
-
-    fn deltas_to_base_stamp2(&self) -> Vec<u32> {
-        let count = self.extension().s_state_count as usize;
-        if count >= 3 {
-            self.extension().s_stamps[0..(count - 2)]
-                .iter()
-                .map(|s| *s)
-                .collect()
-        } else {
-            vec![]
-        }
-    }
-
-    #[inline]
-    fn release_cause2(&self) -> ReleaseCause {
-        self.extension().release_cause()
-    }
-
-    #[inline]
-    fn set_release_cause2(&mut self, cause: ReleaseCause) {
-        self.extension_mut().set_release_cause(cause);
+        write!(f, "({:?}, {:?})", self.states(), self.release_cause(),)
     }
 }
 
@@ -194,7 +120,7 @@ pub struct Connection {
 
 const ERR_NO_CON_RECORD: &str = "connection has no ConRecord";
 
-impl ConRecordOperations<ProxyRecord> for Connection {
+impl ConRecordOperations<ProxyRecStore> for Connection {
     #[inline]
     fn store(&self) -> &Rc<RefCell<ProxyRecStore>> {
         self.store.as_ref().unwrap()
@@ -239,15 +165,13 @@ impl Connection {
             .borrow_mut()
             .get_mut(self.con_rec())
             .unwrap()
-            .con_record_mut()
             .init(TcpRole::Proxy, proxy_sport, Some(*client_sock));
         self.store
             .as_ref()
             .unwrap()
             .borrow_mut()
-            .get_mut(self.con_rec())
+            .get_mut_1(self.con_rec())
             .unwrap()
-            .extension_mut()
             .init();
     }
 
@@ -288,30 +212,30 @@ impl Connection {
 
     #[inline]
     pub fn s_last_state(&self) -> TcpState {
-        self.store().borrow().get(self.con_rec()).unwrap().last_state2()
+        self.store().borrow().get_1(self.con_rec()).unwrap().last_state()
     }
 
     #[inline]
     pub fn s_states(&self) -> Vec<TcpState> {
-        self.store().borrow().get(self.con_rec()).unwrap().extension().states()
+        self.store().borrow().get_1(self.con_rec()).unwrap().states()
     }
 
     #[inline]
     pub fn s_push_state(&mut self, state: TcpState) {
+        let base_stamp = self.store().borrow().get(self.con_rec()).unwrap().base_stamp();
         self.store()
             .borrow_mut()
-            .get_mut(self.con_rec())
+            .get_mut_1(self.con_rec())
             .unwrap()
-            .push_state2(state)
+            .push_state(state, base_stamp)
     }
 
     #[inline]
     pub fn s_set_release_cause(&mut self, cause: ReleaseCause) {
         self.store()
             .borrow_mut()
-            .get_mut(self.con_rec())
+            .get_mut_1(self.con_rec())
             .unwrap()
-            .extension_mut()
             .set_release_cause(cause)
     }
 }
@@ -359,7 +283,7 @@ impl ConnectionManager {
         let port_mask = pci.port.get_tcp_dst_port_mask();
         let max_tcp_port = tcp_port_base + !port_mask;
         // one store for client and server side
-        let store = Rc::new(RefCell::new(RecordStore::with_capacity(MAX_RECORDS)));
+        let store = Rc::new(RefCell::new(Store64::with_capacity(MAX_RECORDS)));
         let mut cm = ConnectionManager {
             record_store: store.clone(),
             sock2port: Sock2Index::new(),
@@ -449,12 +373,12 @@ impl ConnectionManager {
             let cc = &mut self.port2con[(port - self.tcp_port_base) as usize];
 
             #[cfg(feature = "profiling")]
-                let timestamp_entry = utils::rdtscp_unsafe();
+            let timestamp_entry = utils::rdtscp_unsafe();
 
             cc.initialize(sock, port, Rc::clone(&self.record_store));
 
             #[cfg(feature = "profiling")]
-                self.time_adder.add_diff(utils::rdtscp_unsafe() - timestamp_entry);
+            self.time_adder.add_diff(utils::rdtscp_unsafe() - timestamp_entry);
 
             debug!(
                 "rxq={}: tcp flow for socket ({},{}) created on {}:{:?}",

@@ -20,7 +20,7 @@ extern crate netfcts;
 mod nftcp;
 mod cmanager;
 
-pub use cmanager::{Connection, ProxyRecord, HasTcpState2};
+pub use cmanager::{Connection, Extension, ProxyRecStore};
 
 use netfcts::tasks::TaskType;
 use netfcts::tasks::KniHandleRequest;
@@ -205,7 +205,7 @@ pub fn setup_pipelines<F1, F2>(
     engine_config: &EngineConfig,
     servers: Vec<L234Data>,
     flowdirector_map: HashMap<i32, Arc<FlowDirector>>,
-    tx: Sender<MessageFrom<ProxyRecord>>,
+    tx: Sender<MessageFrom<ProxyRecStore>>,
     system_data: SystemData,
     f_select_server: F1,
     f_process_payload_c_s: F2,
@@ -275,7 +275,7 @@ pub fn setup_pipelines<F1, F2>(
 }
 
 pub fn spawn_recv_thread(
-    mrx: Receiver<MessageFrom<ProxyRecord>>,
+    mrx: Receiver<MessageFrom<ProxyRecStore>>,
     mut context: NetBricksContext,
     configuration: Configuration,
 ) {

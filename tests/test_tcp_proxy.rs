@@ -40,9 +40,9 @@ use netfcts::initialize_flowdirector;
 use netfcts::tcp_common::{ReleaseCause, TcpStatistics, L234Data, TcpState};
 use netfcts::system::{SystemData, get_mac_from_ifname};
 use netfcts::io::{ print_tcp_counters, print_rx_tx_counters};
-use netfcts::{ConRecordOperations, HasTcpState, };
+use netfcts::{ConRecordOperations, HasTcpState, ConRecord};
 
-use tcp_proxy::{Connection, ProxyRecord, HasTcpState2};
+use tcp_proxy::{Connection, ProxyRecStore, Extension};
 use tcp_proxy::{read_config};
 use tcp_proxy::setup_pipelines;
 use netfcts::comm::{MessageFrom, MessageTo};
@@ -171,8 +171,8 @@ fn delayed_binding_proxy() {
                 &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap(),
             );
             context.start_schedulers();
-            let (mtx, mrx) = channel::<MessageFrom<ProxyRecord>>();
-            let (reply_mtx, reply_mrx) = channel::<MessageTo<ProxyRecord>>();
+            let (mtx, mrx) = channel::<MessageFrom<ProxyRecStore>>();
+            let (reply_mtx, reply_mrx) = channel::<MessageTo<ProxyRecStore>>();
 
             let proxy_config_cloned = configuration.clone();
             let system_data_cloned = system_data.clone();
@@ -201,7 +201,11 @@ fn delayed_binding_proxy() {
             mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
             thread::sleep(Duration::from_millis(500 as u64));
 
-            info!("Connection record size = {}",  mem::size_of::<ProxyRecord>());
+            info!(
+                "Connection record size = {}+{}",
+                mem::size_of::<ConRecord>(),
+                mem::size_of::<Extension>()
+            );
 
             // set up servers
             for server in configuration.targets {
@@ -299,11 +303,7 @@ fn delayed_binding_proxy() {
                         tcp_counters_s.insert(pipeline_id, tcp_counter_s);
                     }
                     Ok(MessageTo::CRecords(pipeline_id, Some(recv_con_records), _)) => {
-                        debug!(
-                            "{}: received {} CRecords",
-                            pipeline_id,
-                            recv_con_records.len(),
-                        );
+                        debug!("{}: received {} CRecords", pipeline_id, recv_con_records.len(),);
                         con_records.insert(pipeline_id, recv_con_records);
                     }
                     Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
@@ -320,23 +320,21 @@ fn delayed_binding_proxy() {
             let mut completed_count_c = 0;
             let mut completed_count_s = 0;
             for (_p, con_recs) in &con_records {
-                for c in con_recs.iter() {
-                    if (c.release_cause() == ReleaseCause::PassiveClose
-                        || c.release_cause() == ReleaseCause::ActiveClose)
+                for c in con_recs.iter_0() {
+                    if (c.release_cause() == ReleaseCause::PassiveClose || c.release_cause() == ReleaseCause::ActiveClose)
                         && c.last_state() == TcpState::Closed
                     {
                         completed_count_c += 1
                     };
-
-                    if (c.release_cause2() == ReleaseCause::PassiveClose
-                        || c.release_cause2() == ReleaseCause::ActiveClose)
+                }
+                for c in con_recs.iter_1() {
+                    if (c.release_cause() == ReleaseCause::PassiveClose || c.release_cause() == ReleaseCause::ActiveClose)
                         && c.last_state() == TcpState::Closed
                     {
                         completed_count_s += 1
                     };
                 }
             }
-
 
             println!("\ncompleted connections c/s: {}/{}\n", completed_count_c, completed_count_s);
 
@@ -356,9 +354,9 @@ fn delayed_binding_proxy() {
 
                 if c_records.len() > 0 {
                     let mut completed_count = 0;
-                    let mut min = c_records.iter().last().unwrap().clone();
+                    let mut min = c_records.iter_0().last().unwrap().clone();
                     let mut max = min.clone();
-                    c_records.iter().enumerate().for_each(|(i, c)| {
+                    c_records.iter_0().enumerate().for_each(|(i, c)| {
                         let line = format!("{:6}: {}\n", i, c);
                         f.write_all(line.as_bytes()).expect("cannot write c_records");
 
@@ -376,8 +374,7 @@ fn delayed_binding_proxy() {
                         if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
                             max = c.clone()
                         }
-                        if i == (c_records.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some()
-                        {
+                        if i == (c_records.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some() {
                             let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
                             info!(
                                 "total used cycles= {}, per connection = {}",

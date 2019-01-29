@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 //use separator::Separatable;
 
-use cmanager::{Connection, ConnectionManager, ProxyRecord};
+use cmanager::{Connection, ConnectionManager};
 use netfcts::timer_wheel::TimerWheel;
 use netfcts::system::SystemData;
 use netfcts::tcp_common::*;
@@ -39,6 +39,8 @@ use netfcts::utils::TimeAdder;
 use EngineConfig;
 use {PipelineId, MessageFrom, MessageTo, TaskType};
 use Timeouts;
+use ProxyRecStore;
+
 use is_kni_core;
 
 const MIN_FRAME_SIZE: usize = 60; // without fcs
@@ -55,7 +57,7 @@ pub fn setup_forwarder<F1, F2>(
     engine_config: &EngineConfig,
     servers: Vec<L234Data>,
     flowdirector_map: HashMap<i32, Arc<FlowDirector>>,
-    tx: Sender<MessageFrom<ProxyRecord>>,
+    tx: Sender<MessageFrom<ProxyRecStore>>,
     system_data: SystemData,
     f_select_server: F1,
     f_process_payload_c_s: F2,
@@ -111,7 +113,7 @@ pub fn setup_forwarder<F1, F2>(
 
     // setting up a a reverse message channel between this pipeline and the main program thread
     debug!("{} setting up reverse channel", pipeline_id);
-    let (remote_tx, rx) = channel::<MessageTo<ProxyRecord>>();
+    let (remote_tx, rx) = channel::<MessageTo<ProxyRecStore>>();
     // we send the transmitter to the remote receiver of our messages
     tx.send(MessageFrom::Channel(pipeline_id.clone(), remote_tx)).unwrap();
 

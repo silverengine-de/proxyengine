@@ -39,7 +39,7 @@ use netfcts::system::{SystemData, get_mac_from_ifname};
 use netfcts::io::{ print_tcp_counters, print_rx_tx_counters};
 use netfcts::{ConRecordOperations, HasTcpState};
 
-use tcp_proxy::{Connection, ProxyRecord, HasTcpState2};
+use tcp_proxy::{Connection, ProxyRecStore};
 use tcp_proxy::{read_config};
 use netfcts::comm::{MessageFrom, MessageTo};
 use tcp_proxy::spawn_recv_thread;
@@ -145,8 +145,8 @@ fn delayed_binding_proxy() {
                 &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap(),
             );
             context.start_schedulers();
-            let (mtx, mrx) = channel::<MessageFrom<ProxyRecord>>();
-            let (reply_mtx, reply_mrx) = channel::<MessageTo<ProxyRecord>>();
+            let (mtx, mrx) = channel::<MessageFrom<ProxyRecStore>>();
+            let (reply_mtx, reply_mrx) = channel::<MessageTo<ProxyRecStore>>();
 
             let proxy_config_cloned = configuration.clone();
             let system_data_cloned = system_data.clone();
@@ -260,9 +260,9 @@ fn delayed_binding_proxy() {
                 info!("Pipeline {}:", p);
                 if c_records.len() > 0 {
                     let mut completed_count = 0;
-                    let mut min = c_records.iter().last().unwrap();
+                    let mut min = c_records.iter_0().last().unwrap();
                     let mut max = min;
-                    c_records.iter().enumerate().for_each(|(i, c)| {
+                    c_records.iter_0().enumerate().for_each(|(i, c)| {
                         info!("{:6}: {}", i, c);
                         if (c.release_cause() == ReleaseCause::PassiveClose
                             || c.release_cause() == ReleaseCause::ActiveClose)
@@ -278,8 +278,7 @@ fn delayed_binding_proxy() {
                         if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
                             max = c
                         }
-                        if i == (c_records.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some()
-                        {
+                        if i == (c_records.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some() {
                             let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
                             info!(
                                 "total used cycles= {}, per connection = {}",
@@ -294,7 +293,7 @@ fn delayed_binding_proxy() {
             let mut completed_count_c = 0;
             let mut completed_count_s = 0;
             for (_p, con_recs) in &con_records {
-                for c in con_recs.iter() {
+                for c in con_recs.iter_0() {
                     if c.release_cause() == ReleaseCause::ActiveClose && c.last_state() == TcpState::Closed {
                         completed_count_c += 1
                     };
@@ -308,16 +307,17 @@ fn delayed_binding_proxy() {
                             TcpState::Closed
                         ]
                     );
-                    if c.release_cause2() == ReleaseCause::PassiveClose && c.last_state2() == TcpState::Closed {
+                }
+                for c in con_recs.iter_1() {
+                    if c.release_cause() == ReleaseCause::PassiveClose && c.last_state() == TcpState::Closed {
                         completed_count_s += 1
                     };
                     assert_eq!(
-                        c.states2(),
+                        c.states(),
                         [TcpState::Listen, TcpState::SynReceived, TcpState::LastAck, TcpState::Closed]
                     );
                 }
             }
-
 
             info!("completed connections c/s: {}/{}", completed_count_c, completed_count_s);
             assert_eq!(completed_count_c, configuration.test_size.unwrap() * CLIENT_THREADS);
