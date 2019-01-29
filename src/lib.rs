@@ -17,12 +17,10 @@ extern crate serde;
 extern crate uuid;
 extern crate netfcts;
 
-pub mod nftcp;
+mod nftcp;
 mod cmanager;
 
-pub use netfcts::tcp_common::{CData, L234Data, UserData, TcpRole, TcpState, TcpCounter, TcpStatistics};
-pub use netfcts::ConRecord;
-pub use cmanager:: Connection;
+pub use cmanager::{Connection, ProxyRecord, HasTcpState2};
 
 use netfcts::tasks::TaskType;
 use netfcts::tasks::KniHandleRequest;
@@ -42,6 +40,7 @@ use nftcp::setup_forwarder;
 use netfcts::{is_kni_core, setup_kni, FlowSteeringMode};
 use netfcts::comm::{MessageFrom, MessageTo, PipelineId};
 use netfcts::system::SystemData;
+use netfcts::tcp_common::{L234Data, UserData};
 
 use std::fs::File;
 use std::io::Read;
@@ -206,7 +205,7 @@ pub fn setup_pipelines<F1, F2>(
     engine_config: &EngineConfig,
     servers: Vec<L234Data>,
     flowdirector_map: HashMap<i32, Arc<FlowDirector>>,
-    tx: Sender<MessageFrom>,
+    tx: Sender<MessageFrom<ProxyRecord>>,
     system_data: SystemData,
     f_select_server: F1,
     f_process_payload_c_s: F2,
@@ -275,7 +274,11 @@ pub fn setup_pipelines<F1, F2>(
     );
 }
 
-pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksContext, configuration: Configuration) {
+pub fn spawn_recv_thread(
+    mrx: Receiver<MessageFrom<ProxyRecord>>,
+    mut context: NetBricksContext,
+    configuration: Configuration,
+) {
     /*
         mrx: receiver for messages from all the pipelines running
     */

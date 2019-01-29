@@ -30,16 +30,16 @@ use e2d2::scheduler::{initialize_system, StandaloneScheduler};
 use e2d2::allocators::CacheAligned;
 
 use netfcts::initialize_flowdirector;
-use netfcts::tcp_common::ReleaseCause;
+use netfcts::tcp_common::{ReleaseCause, L234Data};
 use netfcts::comm::{ MessageFrom, MessageTo };
 use netfcts::system::{SystemData, get_mac_from_ifname};
-use netfcts::ConRecordOperations;
+use netfcts::{ConRecordOperations, HasTcpState};
 
 use tcp_proxy::Connection;
 use tcp_proxy::{read_config, };
 use tcp_proxy::setup_pipelines;
-use tcp_proxy::L234Data;
 use tcp_proxy::spawn_recv_thread;
+use tcp_proxy::ProxyRecord;
 
 #[test]
 fn delayed_binding_proxy() {
@@ -89,7 +89,8 @@ fn delayed_binding_proxy() {
     ctrlc::set_handler(move || {
         info!("received SIGINT or SIGTERM");
         r.store(false, Ordering::SeqCst);
-    }).expect("error setting Ctrl-C handler");
+    })
+    .expect("error setting Ctrl-C handler");
 
     let opts = basic_opts();
 
@@ -107,7 +108,7 @@ fn delayed_binding_proxy() {
         .targets
         .iter()
         .enumerate()
-        .map(|(i,srv_cfg)| L234Data {
+        .map(|(i, srv_cfg)| L234Data {
             mac: srv_cfg
                 .mac
                 .unwrap_or_else(|| get_mac_from_ifname(srv_cfg.linux_if.as_ref().unwrap()).unwrap()),
@@ -115,17 +116,18 @@ fn delayed_binding_proxy() {
             port: srv_cfg.port,
             server_id: srv_cfg.id.clone(),
             index: i,
-        }).collect();
+        })
+        .collect();
 
     let proxy_config_cloned = configuration.clone();
-    let l234data_clone=l234data.clone();
+    let l234data_clone = l234data.clone();
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_select_server = move |c: &mut Connection| {
         let s = String::from_utf8(c.payload_packet.as_ref().unwrap().get_payload().to_vec()).unwrap();
         // read first item in string and convert to usize:
         let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
         let remainder = stars % l234data_clone.len();
-        c.s_mut().set_server_index(remainder);
+        c.set_server_index(remainder);
         info!("selecting {}", proxy_config_cloned.targets[remainder].id);
     };
 
@@ -134,10 +136,14 @@ fn delayed_binding_proxy() {
 
     match initialize_system(&mut netbricks_configuration) {
         Ok(mut context) => {
-            let flowdirector_map = initialize_flowdirector(&context, configuration.flow_steering_mode(), &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap());
+            let flowdirector_map = initialize_flowdirector(
+                &context,
+                configuration.flow_steering_mode(),
+                &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap(),
+            );
             context.start_schedulers();
-            let (mtx, mrx) = channel::<MessageFrom>();
-            let (reply_mtx, reply_mrx) = channel::<MessageTo>();
+            let (mtx, mrx) = channel::<MessageFrom<ProxyRecord>>();
+            let (reply_mtx, reply_mrx) = channel::<MessageTo<ProxyRecord>>();
 
             let proxy_config_cloned = configuration.clone();
             let system_data_cloned = system_data.clone();
@@ -216,13 +222,13 @@ fn delayed_binding_proxy() {
             mtx.send(MessageFrom::FetchCRecords).unwrap();
 
             match reply_mrx.recv_timeout(Duration::from_millis(5000)) {
-                Ok(MessageTo::CRecords(_pipeline_id, con_records_c, _con_records_s)) => {
-                    assert_eq!(con_records_c.len(), configuration.test_size.unwrap() * CLIENT_THREADS);
-                    let mut timeouts =0;
-                    for c in con_records_c.iter() {
+                Ok(MessageTo::CRecords(_pipeline_id, Some(con_records), _)) => {
+                    assert_eq!(con_records.len(), configuration.test_size.unwrap() * CLIENT_THREADS);
+                    let mut timeouts = 0;
+                    for c in con_records.iter() {
                         debug!("{}", c);
-                        if c.get_release_cause() == ReleaseCause::Timeout {
-                            timeouts +=1;
+                        if c.release_cause() == ReleaseCause::Timeout {
+                            timeouts += 1;
                         }
                     }
                     assert_eq!(timeouts, configuration.test_size.unwrap() * CLIENT_THREADS);
@@ -232,7 +238,6 @@ fn delayed_binding_proxy() {
                     error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
                 }
             }
-
 
             mtx.send(MessageFrom::Exit).unwrap();
             thread::sleep(Duration::from_millis(2000));

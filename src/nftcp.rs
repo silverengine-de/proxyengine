@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 //use separator::Separatable;
 
-use cmanager::{Connection, ConnectionManager};
+use cmanager::{Connection, ConnectionManager, ProxyRecord};
 use netfcts::timer_wheel::TimerWheel;
 use netfcts::system::SystemData;
 use netfcts::tcp_common::*;
@@ -55,7 +55,7 @@ pub fn setup_forwarder<F1, F2>(
     engine_config: &EngineConfig,
     servers: Vec<L234Data>,
     flowdirector_map: HashMap<i32, Arc<FlowDirector>>,
-    tx: Sender<MessageFrom>,
+    tx: Sender<MessageFrom<ProxyRecord>>,
     system_data: SystemData,
     f_select_server: F1,
     f_process_payload_c_s: F2,
@@ -111,7 +111,7 @@ pub fn setup_forwarder<F1, F2>(
 
     // setting up a a reverse message channel between this pipeline and the main program thread
     debug!("{} setting up reverse channel", pipeline_id);
-    let (remote_tx, rx) = channel::<MessageTo>();
+    let (remote_tx, rx) = channel::<MessageTo<ProxyRecord>>();
     // we send the transmitter to the remote receiver of our messages
     tx.send(MessageFrom::Channel(pipeline_id.clone(), remote_tx)).unwrap();
 
@@ -193,9 +193,9 @@ pub fn setup_forwarder<F1, F2>(
 
             #[inline]
             fn client_syn_received(p: &mut Packet<TcpHeader, EmptyMetadata>, c: &mut Connection, h: &mut HeaderState) {
-                c.c().push_state(TcpState::SynSent);
+                c.push_state(TcpState::SynSent);
                 c.client_mac = h.mac.src;
-                c.set_client_sock((h.ip.src(), h.tcp.src_port()));
+                c.set_sock((h.ip.src(), h.tcp.src_port()));
                 remove_tcp_options(p, h);
                 make_reply_packet(h, 1);
                 //generate seq number:
@@ -218,7 +218,7 @@ pub fn setup_forwarder<F1, F2>(
                 let ip_client = h.ip.src();
                 let old_ip_dst = h.ip.dst();
                 let port_client = h.tcp.src_port();
-                let server = &servers[c.s().server_index()];
+                let server = &servers[c.server_index()];
 
                 if tcp_payload_size(p) > 0 {
                     let tailroom = p.get_tailroom();
@@ -267,28 +267,28 @@ pub fn setup_forwarder<F1, F2>(
                 h: &mut HeaderState,
                 me: &Me,
             ) {
-                //if c.get_client_sock().unwrap().port() == OBSERVE_PORT { info!("server_to_client pos 0: {}", utils::rdtsc_unsafe().separated_string()) }
                 // this is the s->c part of the stable two-way connection state
                 // translate packets and forward to client
+                let sock = c.sock().unwrap();
                 h.mac.set_dmac(&c.client_mac);
                 h.mac.set_smac(&me.l234.mac);
                 let ip_server = h.ip.src();
                 let old_dest_ip = h.ip.dst();
-                h.ip.set_dst(c.get_client_sock().unwrap().0);
+                h.ip.set_dst(sock.0);
                 h.ip.set_src(me.l234.ip);
                 let server_src_port = h.tcp.src_port();
                 h.tcp.set_src_port(me.l234.port);
-                h.tcp.set_dst_port(c.get_client_sock().unwrap().1);
+                h.tcp.set_dst_port(sock.1);
                 if !p.tcp_checksum_tx_offload() {
                     h.tcp.update_checksum_incremental(server_src_port, me.l234.port);
-                    h.tcp.update_checksum_incremental(c.port(), c.get_client_sock().unwrap().1);
+                    h.tcp.update_checksum_incremental(c.port(), sock.1);
                     h.tcp.update_checksum_incremental(
                         !finalize_checksum(ip_server),
                         !finalize_checksum(me.l234.ip),
                     );
                     h.tcp.update_checksum_incremental(
                         !finalize_checksum(old_dest_ip),
-                        !finalize_checksum(c.get_client_sock().unwrap().0),
+                        !finalize_checksum(sock.0),
                     );
                 }
                 // adapt seqn and ackn from server packet
@@ -334,7 +334,7 @@ pub fn setup_forwarder<F1, F2>(
                 c.c2s_inserted_bytes = tcp_payload_size(c.payload_packet.as_ref().unwrap()) as isize - payload_sz as isize;
 
                 // set the header for the selected server in the payload packet p and its clone p_clone
-                set_header(&servers[c.s().server_index()], c.port(), h, &me.l234.mac, me.ip_s);
+                set_header(&servers[c.server_index()], c.port(), h, &me.l234.mac, me.ip_s);
                 // create a brand new mac frame with a new mbuf, using the adapted MAC header. It later becomes our SYN packet
                 let syn = new_packet().unwrap().push_header(h.mac).unwrap();
                 // this is a little bit tricky: we replace the borrowed packet of the closure, with the new mac frame
@@ -500,7 +500,7 @@ pub fn setup_forwarder<F1, F2>(
                             debug!("{}: received FetchCRecords", pipeline_id_clone);
                             let c_recs = cm.fetch_c_records();
                             tx_clone
-                                .send(MessageFrom::CRecords(pipeline_id_clone.clone(), c_recs.0.unwrap(), c_recs.1.unwrap()))
+                                .send(MessageFrom::CRecords(pipeline_id_clone.clone(), c_recs, None))
                                 .unwrap();
                         }
                         _ => {}
@@ -544,8 +544,8 @@ pub fn setup_forwarder<F1, F2>(
                             // we only handle active open on client side:
                             // we reset server and client state
                             //TODO revisit this approach
-                            let old_s_state = c.s().last_state().clone();
-                            let old_c_state = c.c().last_state().clone();
+                            let old_s_state = c.s_last_state().clone();
+                            let old_c_state = c.last_state().clone();
 
                             //check seqn
                             if old_c_state != TcpState::Closed && hs.tcp.seq_num() < c.ackn_p2c {
@@ -563,12 +563,12 @@ pub fn setup_forwarder<F1, F2>(
                                     c.wheel_slot_and_index = wheel.schedule(&(timeouts.established.unwrap() * system_data.cpu_clock / 1000), c.port());
                                     group_index = 1;
                                 } else {
-                                    warn!("received client SYN in state {:?}/{:?}", c.c().states(), c.s().states());
+                                    warn!("received client SYN in state {:?}/{:?}", c.states(), c.s_states());
                                 }
                                 #[cfg(feature = "profiling")]
                                     time_adders[2].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                             } else if hs.tcp.ack_flag() && old_c_state == TcpState::SynSent {
-                                c.client_con_established();
+                                c.push_state(TcpState::Established);
                                 counter_c[TcpStatistics::RecvSynAck2] += 1;
                                 #[cfg(feature = "profiling")]
                                     time_adders[4].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
@@ -580,24 +580,24 @@ pub fn setup_forwarder<F1, F2>(
                                         counter_s[TcpStatistics::SentFinPssv] += 1;
                                         counter_c[TcpStatistics::RecvAck4Fin] += 1;
                                         counter_s[TcpStatistics::SentAck4Fin] += 1;
-                                        c.c().released(ReleaseCause::PassiveClose);
-                                        c.c().push_state(TcpState::LastAck);
+                                        c.set_release_cause(ReleaseCause::PassiveClose);
+                                        c.push_state(TcpState::LastAck);
                                     } else { // no ACK
                                         counter_c[TcpStatistics::RecvFin] += 1;
                                         counter_s[TcpStatistics::SentFin] += 1;
-                                        c.c().released(ReleaseCause::ActiveClose);
-                                        c.c().push_state(TcpState::Closing); //will still receive FIN of server
+                                        c.set_release_cause(ReleaseCause::ActiveClose);
+                                        c.push_state(TcpState::Closing); //will still receive FIN of server
                                         if old_s_state == TcpState::FinWait1 {
-                                            c.s().push_state(TcpState::Closing);
+                                            c.s_push_state(TcpState::Closing);
                                         } else if old_s_state == TcpState::FinWait2 {
-                                            c.s().push_state(TcpState::Closed)
+                                            c.s_push_state(TcpState::Closed)
                                         }
                                     }
                                     group_index = 1;
                                 } else { // client in active close
-                                    c.c().released(ReleaseCause::ActiveClose);
+                                    c.set_release_cause(ReleaseCause::ActiveClose);
                                     counter_c[TcpStatistics::RecvFin] += 1;
-                                    c.c().push_state(TcpState::FinWait1);
+                                    c.push_state(TcpState::FinWait1);
                                     if old_s_state < TcpState::Established {
                                         // in case the server connection is still not established
                                         // proxy must close connection and sends Fin-Ack to client
@@ -607,8 +607,8 @@ pub fn setup_forwarder<F1, F2>(
                                         hs.tcp.set_seq_num(c.c_seqn);
                                         //debug!("data_len= { }, p= { }",p.data_len(), p);
                                         prepare_checksum_and_ttl(p, &mut hs);
-                                        c.s().push_state(TcpState::LastAck); // pretend that server received the FIN
-                                        c.s().released(ReleaseCause::PassiveClose);
+                                        c.s_push_state(TcpState::LastAck); // pretend that server received the FIN
+                                        c.s_set_release_cause(ReleaseCause::PassiveClose);
                                         counter_c[TcpStatistics::SentFinPssv] += 1;
                                         counter_c[TcpStatistics::SentAck4Fin] += 1;
                                         c.seqn_fin_p2c = hs.tcp.seq_num();
@@ -622,20 +622,20 @@ pub fn setup_forwarder<F1, F2>(
                             } else if hs.tcp.rst_flag() {
                                 trace!("received RST");
                                 counter_c[TcpStatistics::RecvRst] += 1;
-                                c.c().push_state(TcpState::Closed);
-                                c.c().released(ReleaseCause::ActiveRst);
+                                c.push_state(TcpState::Closed);
+                                c.set_release_cause(ReleaseCause::ActiveRst);
                                 release_connection = Some(c.port());
                             } else if hs.tcp.ack_flag() && hs.tcp.ack_num() == c.seqn_fin_p2c.wrapping_add(1) && old_s_state >= TcpState::FinWait1 {
                                 // ACK from client for FIN of Server
                                 match old_s_state {
-                                    TcpState::FinWait1 => { c.s().push_state(TcpState::FinWait2); }
-                                    TcpState::Closing => { c.s().push_state(TcpState::Closed); }
+                                    TcpState::FinWait1 => { c.s_push_state(TcpState::FinWait2); }
+                                    TcpState::Closing => { c.s_push_state(TcpState::Closed); }
                                     _ => {}
                                 }
                                 match old_c_state {
-                                    TcpState::Established => { c.c().push_state(TcpState::CloseWait) }
-                                    TcpState::FinWait1 => { c.c().push_state(TcpState::Closing) }
-                                    TcpState::FinWait2 => { c.c().push_state(TcpState::Closed) }
+                                    TcpState::Established => { c.push_state(TcpState::CloseWait) }
+                                    TcpState::FinWait1 => { c.push_state(TcpState::Closing) }
+                                    TcpState::FinWait2 => { c.push_state(TcpState::Closed) }
                                     _ => {}
                                 }
                                 counter_c[TcpStatistics::RecvAck4Fin] += 1;
@@ -648,8 +648,8 @@ pub fn setup_forwarder<F1, F2>(
                                     hs.tcp.src_port(),
                                     c.port(),
                                 );
-                                c.s().push_state(TcpState::Closed);
-                                c.c().push_state(TcpState::Closed);
+                                c.s_push_state(TcpState::Closed);
+                                c.push_state(TcpState::Closed);
                                 counter_c[TcpStatistics::RecvAck4Fin] += 1;
                                 counter_s[TcpStatistics::SentAck4Fin] += 1;
                             } else if old_c_state == TcpState::Established
@@ -657,7 +657,7 @@ pub fn setup_forwarder<F1, F2>(
                                 // should be the first payload packet from client
                                 select_server(p, &mut c, &mut hs, packet_in, &me, &servers, &f_select_server);
                                 debug!("{} SYN packet to server - L3: {}, L4: {}", thread_id, hs.ip, p.get_header());
-                                c.s().push_state(TcpState::SynReceived);
+                                c.s_push_state(TcpState::SynReceived);
                                 counter_c[TcpStatistics::Payload] += 1;
                                 counter_s[TcpStatistics::SentSyn] += 1;
                                 group_index = 1;
@@ -669,14 +669,14 @@ pub fn setup_forwarder<F1, F2>(
                                     thread_id,
                                     hs.tcp.src_port(),
                                     c.port(),
-                                    c.c().states(),
-                                    c.s().states(),
+                                    c.states(),
+                                    c.s_states(),
                                 );
                                 counter_c[TcpStatistics::Unexpected] += 1;
                                 group_index = 2;
                             }
 
-                            if c.c().last_state() == TcpState::Closed && c.s().last_state() == TcpState::Closed {
+                            if c.last_state() == TcpState::Closed && c.s_last_state() == TcpState::Closed {
                                 release_connection = Some(c.port());
                             }
 
@@ -700,8 +700,8 @@ pub fn setup_forwarder<F1, F2>(
                             if c.is_some() {
                                 let mut c = c.as_mut().unwrap();
                                 let mut b_unexpected = false;
-                                let old_s_state = c.s().last_state().clone();
-                                let old_c_state = c.c().last_state().clone();
+                                let old_s_state = c.s_last_state().clone();
+                                let old_c_state = c.last_state().clone();
 
                                 if hs.tcp.ack_flag() && hs.tcp.syn_flag() {
                                     counter_s[TcpStatistics::RecvSynAck] += 1;
@@ -726,18 +726,18 @@ pub fn setup_forwarder<F1, F2>(
                                             counter_s[TcpStatistics::RecvAck4Fin] += 1;
                                             counter_c[TcpStatistics::SentAck4Fin] += 1;
                                             trace!("{} received FIN-reply from server on proxy port {}", thread_id, hs.tcp.dst_port());
-                                            c.s().released(ReleaseCause::PassiveClose);
-                                            c.s().push_state(TcpState::LastAck);
+                                            c.s_set_release_cause(ReleaseCause::PassiveClose);
+                                            c.s_push_state(TcpState::LastAck);
                                         } else {
                                             trace!("simultaneous active close from server on port {}", hs.tcp.dst_port());
                                             counter_s[TcpStatistics::RecvFin] += 1;
                                             counter_c[TcpStatistics::SentFin] += 1;
-                                            c.s().released(ReleaseCause::ActiveClose);
-                                            c.s().push_state(TcpState::Closing);
+                                            c.s_set_release_cause(ReleaseCause::ActiveClose);
+                                            c.s_push_state(TcpState::Closing);
                                             if old_c_state == TcpState::FinWait1 {
-                                                c.c().push_state(TcpState::Closing);
+                                                c.push_state(TcpState::Closing);
                                             } else if old_c_state == TcpState::FinWait2 {
-                                                c.c().push_state(TcpState::Closed)
+                                                c.push_state(TcpState::Closed)
                                             }
                                         }
                                     } else {
@@ -746,11 +746,11 @@ pub fn setup_forwarder<F1, F2>(
                                             "{} server closes connection on port {}/{} in state {:?}",
                                             thread_id,
                                             hs.tcp.dst_port(),
-                                            c.get_client_sock().unwrap().1,
-                                            c.s().states(),
+                                            c.sock().unwrap().1,
+                                            c.s_states(),
                                         );
-                                        c.s().push_state(TcpState::FinWait1);
-                                        c.s().released(ReleaseCause::ActiveClose);
+                                        c.s_push_state(TcpState::FinWait1);
+                                        c.s_set_release_cause(ReleaseCause::ActiveClose);
                                         counter_s[TcpStatistics::RecvFin] += 1;
                                         counter_c[TcpStatistics::SentFin] += 1;
                                     }
@@ -759,12 +759,12 @@ pub fn setup_forwarder<F1, F2>(
                                         // received  Ack from server for a FIN
                                         match old_c_state {
                                             TcpState::LastAck => {
-                                                c.c().push_state(TcpState::Closed);
-                                                c.s().push_state(TcpState::Closed);
+                                                c.push_state(TcpState::Closed);
+                                                c.s_push_state(TcpState::Closed);
                                             }
-                                            TcpState::FinWait1 => { c.c().push_state(TcpState::FinWait2) }
+                                            TcpState::FinWait1 => { c.push_state(TcpState::FinWait2) }
                                             TcpState::Closing => {
-                                                c.c().push_state(TcpState::Closed);
+                                                c.push_state(TcpState::Closed);
                                             }
                                             _ => {}
                                         }
@@ -774,14 +774,14 @@ pub fn setup_forwarder<F1, F2>(
                                         }
                                         counter_s[TcpStatistics::RecvAck4Fin] += 1;
                                         counter_c[TcpStatistics::SentAck4Fin] += 1;
-                                        trace!("{} on proxy port {} transition to client/server state {:?}/{:?}", thread_id, c.port(), c.c().states(), c.s().states());
+                                        trace!("{} on proxy port {} transition to client/server state {:?}/{:?}", thread_id, c.port(), c.states(), c.s_states());
                                     }
                                 } else {
                                     // debug!("received from server { } in c/s state {:?}/{:?} ", hs.tcp, c.con_rec.c_state, c.con_rec.s_state);
                                     b_unexpected = true; //  may still be revised, see below
                                 }
 
-                                if c.c().last_state() == TcpState::Closed && c.s().last_state() == TcpState::Closed {
+                                if c.last_state() == TcpState::Closed && c.s_last_state() == TcpState::Closed {
                                     release_connection = Some(c.port());
                                 }
 
@@ -802,9 +802,9 @@ pub fn setup_forwarder<F1, F2>(
                                         "{} unexpected server side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
                                         thread_id,
                                         hs.tcp.dst_port(),
-                                        c.get_client_sock().unwrap().1,
-                                        c.c().states(),
-                                        c.s().states(),
+                                        c.sock().unwrap().1,
+                                        c.states(),
+                                        c.s_states(),
                                     );
                                     group_index = 2;
                                 }

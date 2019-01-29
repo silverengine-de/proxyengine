@@ -34,13 +34,14 @@ use std::str::FromStr;
 use std::io::{BufWriter, Write};
 use std::error::Error;
 use std::fs::File;
+use std::mem;
 
 //use uuid::Uuid;
 use ipnet::Ipv4Net;
 use separator::Separatable;
 
 use netfcts::initialize_flowdirector;
-use netfcts::tcp_common::{ReleaseCause, CData};
+use netfcts::tcp_common::{ReleaseCause, CData, L234Data, TcpState};
 use netfcts::comm::{MessageFrom, MessageTo};
 use netfcts::system::SystemData;
 use netfcts::errors::*;
@@ -48,14 +49,12 @@ use netfcts::io::{ print_tcp_counters };
 #[cfg(feature = "profiling")]
 use netfcts::io::print_rx_tx_counters;
 use netfcts::system::get_mac_from_ifname;
-use netfcts::ConRecordOperations;
+use netfcts::{ConRecordOperations, HasTcpState, HasConData};
 
 use tcp_proxy::{read_config, setup_pipelines};
-use tcp_proxy::Connection;
+use tcp_proxy::{Connection, ProxyRecord, HasTcpState2};
 use tcp_proxy::Container;
-use tcp_proxy::L234Data;
 use tcp_proxy::spawn_recv_thread;
-use tcp_proxy::TcpState;
 
 pub fn main() {
     env_logger::init();
@@ -149,7 +148,7 @@ pub fn main() {
 
         for (i, l234) in l234data_clone.iter().enumerate() {
             if l234.port == cdata.reply_socket.port() && l234.ip == u32::from(*cdata.reply_socket.ip()) {
-                c.s_mut().set_server_index(i);
+                c.set_server_index(i);
                 break;
             }
         }
@@ -191,8 +190,8 @@ pub fn main() {
                 fdir_get_infos(1u16);
             }
             context.start_schedulers();
-            let (mtx, mrx) = channel::<MessageFrom>();
-            let (reply_mtx, reply_mrx) = channel::<MessageTo>();
+            let (mtx, mrx) = channel::<MessageFrom<ProxyRecord>>();
+            let (reply_mtx, reply_mrx) = channel::<MessageTo<ProxyRecord>>();
 
             let proxy_config_cloned = configuration.clone();
             let system_data_cloned = system_data.clone();
@@ -226,6 +225,9 @@ pub fn main() {
                 }
             }
 
+
+            info!("Connection record size = {}",  mem::size_of::<ProxyRecord>());
+
             //main loop
             println!("press ctrl-c to terminate proxy ...");
             while running.load(Ordering::SeqCst) {
@@ -252,9 +254,13 @@ pub fn main() {
                         tcp_counters_c.insert(pipeline_id.clone(), tcp_counter_c);
                         tcp_counters_s.insert(pipeline_id, tcp_counter_s);
                     }
-                    Ok(MessageTo::CRecords(pipeline_id, con_records_c, con_records_s)) => {
-                        debug!("{}: received CRecords", pipeline_id);
-                        con_records.insert(pipeline_id, (con_records_c, con_records_s));
+                    Ok(MessageTo::CRecords(pipeline_id, Some(recv_con_records), _)) => {
+                        debug!(
+                            "{}: received {} CRecords",
+                            pipeline_id,
+                            recv_con_records.len(),
+                        );
+                        con_records.insert(pipeline_id, recv_con_records);
                     }
                     Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
                     Err(RecvTimeoutError::Timeout) => {
@@ -268,28 +274,25 @@ pub fn main() {
             }
 
             let mut completed_count_c = 0;
-            for (_p, (con_recs, _)) in &con_records {
+            let mut completed_count_s = 0;
+            for (_p, con_recs) in &con_records {
                 for c in con_recs.iter() {
-                    if (c.get_release_cause() == ReleaseCause::PassiveClose
-                        || c.get_release_cause() == ReleaseCause::ActiveClose)
+                    if (c.release_cause() == ReleaseCause::PassiveClose
+                        || c.release_cause() == ReleaseCause::ActiveClose)
                         && c.last_state() == TcpState::Closed
                     {
                         completed_count_c += 1
                     };
-                }
-            }
 
-            let mut completed_count_s = 0;
-            for (_p, (_, con_recs)) in &con_records {
-                for c in con_recs.iter() {
-                    if (c.get_release_cause() == ReleaseCause::PassiveClose
-                        || c.get_release_cause() == ReleaseCause::ActiveClose)
+                    if (c.release_cause2() == ReleaseCause::PassiveClose
+                        || c.release_cause2() == ReleaseCause::ActiveClose)
                         && c.last_state() == TcpState::Closed
                     {
                         completed_count_s += 1
                     };
                 }
             }
+
             info!("completed connections c/s: {}/{}", completed_count_c, completed_count_s);
 
             // write connection records into a file:
@@ -299,30 +302,23 @@ pub fn main() {
             };
             let mut f = BufWriter::new(file);
 
-            for (p, (mut c_records_c, mut c_records_s)) in con_records {
+            for (p, mut c_records) in con_records {
                 info!("Pipeline {}:", p);
                 f.write_all(format!("Pipeline {}:\n", p).as_bytes())
                     .expect("cannot write c_records");
-                // make HashMap with key uuid
-                let mut by_uuid = HashMap::with_capacity(c_records_s.len());
-                for c in c_records_s.iter() {
-                    by_uuid.insert(c.uid(), c.clone());
-                }
 
-                if c_records_c.len() > 0 {
+                if c_records.len() > 0 {
                     let mut completed_count = 0;
-                    let mut min = c_records_c.iter().last().unwrap().clone();
+                    let mut min = c_records.iter().last().unwrap().clone();
                     let mut max = min.clone();
-                    c_records_c.sort_by(|a, b| a.sock.unwrap().1.cmp(&b.sock.unwrap().1));
+                    c_records.sort_by(|a, b| a.sock().1.cmp(&b.sock().1));
 
-                    c_records_c.iter().enumerate().for_each(|(i, c)| {
-                        let c_server = by_uuid.remove(&c.uid());
+                    c_records.iter().enumerate().for_each(|(i, c)| {
                         let line = format!("{:6}: {}\n", i, c);
                         f.write_all(line.as_bytes()).expect("cannot write c_records");
-                        f.write_all(format!("        {}\n", c_server.unwrap()).as_bytes())
-                            .expect("cannot write c_records");
-                        if (c.get_release_cause() == ReleaseCause::PassiveClose
-                            || c.get_release_cause() == ReleaseCause::ActiveClose)
+
+                        if (c.release_cause() == ReleaseCause::PassiveClose
+                            || c.release_cause() == ReleaseCause::ActiveClose)
                             && c.states().last().unwrap() == &TcpState::Closed
                         {
                             completed_count += 1
@@ -335,7 +331,7 @@ pub fn main() {
                         if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
                             max = c.clone()
                         }
-                        if i == (c_records_c.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some()
+                        if i == (c_records.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some()
                         {
                             let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
                             info!(

@@ -34,18 +34,16 @@ use e2d2::scheduler::StandaloneScheduler;
 use e2d2::allocators::CacheAligned;
 
 use netfcts::initialize_flowdirector;
-use netfcts::tcp_common::ReleaseCause;
+use netfcts::tcp_common::{ReleaseCause, L234Data, TcpState};
 use netfcts::system::{SystemData, get_mac_from_ifname};
 use netfcts::io::{ print_tcp_counters, print_rx_tx_counters};
-use netfcts::ConRecordOperations;
+use netfcts::{ConRecordOperations, HasTcpState};
 
-use tcp_proxy::Connection;
+use tcp_proxy::{Connection, ProxyRecord, HasTcpState2};
 use tcp_proxy::{read_config};
-use tcp_proxy::L234Data;
 use netfcts::comm::{MessageFrom, MessageTo};
 use tcp_proxy::spawn_recv_thread;
 use tcp_proxy::setup_pipelines;
-use tcp_proxy::TcpState;
 
 #[test]
 fn delayed_binding_proxy() {
@@ -94,7 +92,8 @@ fn delayed_binding_proxy() {
     ctrlc::set_handler(move || {
         info!("received SIGINT or SIGTERM");
         r.store(false, Ordering::SeqCst);
-    }).expect("error setting Ctrl-C handler");
+    })
+    .expect("error setting Ctrl-C handler");
 
     let opts = basic_opts();
 
@@ -112,7 +111,7 @@ fn delayed_binding_proxy() {
         .targets
         .iter()
         .enumerate()
-        .map(|(i,srv_cfg)| L234Data {
+        .map(|(i, srv_cfg)| L234Data {
             mac: srv_cfg
                 .mac
                 .unwrap_or_else(|| get_mac_from_ifname(srv_cfg.linux_if.as_ref().unwrap()).unwrap()),
@@ -120,17 +119,18 @@ fn delayed_binding_proxy() {
             port: srv_cfg.port,
             server_id: srv_cfg.id.clone(),
             index: i,
-        }).collect();
+        })
+        .collect();
 
     let proxy_config_cloned = configuration.clone();
-    let l234data_clone=l234data.clone();
+    let l234data_clone = l234data.clone();
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_select_server = move |c: &mut Connection| {
         let s = String::from_utf8(c.payload_packet.as_ref().unwrap().get_payload().to_vec()).unwrap();
         // read first item in string and convert to usize:
         let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
         let remainder = stars % l234data_clone.len();
-        c.s_mut().set_server_index(remainder);
+        c.set_server_index(remainder);
         debug!("selecting {}", proxy_config_cloned.targets[remainder].id);
     };
 
@@ -139,10 +139,14 @@ fn delayed_binding_proxy() {
 
     match initialize_system(&mut netbricks_configuration) {
         Ok(mut context) => {
-            let flowdirector_map = initialize_flowdirector(&context, configuration.flow_steering_mode(), &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap());
+            let flowdirector_map = initialize_flowdirector(
+                &context,
+                configuration.flow_steering_mode(),
+                &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap(),
+            );
             context.start_schedulers();
-            let (mtx, mrx) = channel::<MessageFrom>();
-            let (reply_mtx, reply_mrx) = channel::<MessageTo>();
+            let (mtx, mrx) = channel::<MessageFrom<ProxyRecord>>();
+            let (reply_mtx, reply_mrx) = channel::<MessageTo<ProxyRecord>>();
 
             let proxy_config_cloned = configuration.clone();
             let system_data_cloned = system_data.clone();
@@ -232,13 +236,15 @@ fn delayed_binding_proxy() {
                 match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
                     Ok(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s, rx_tx_stats)) => {
                         print_tcp_counters(&pipeline_id, &tcp_counter_c, &tcp_counter_s);
-                        if rx_tx_stats.is_some() { print_rx_tx_counters(&pipeline_id, &rx_tx_stats.unwrap()); }
+                        if rx_tx_stats.is_some() {
+                            print_rx_tx_counters(&pipeline_id, &rx_tx_stats.unwrap());
+                        }
                         tcp_counters_c.insert(pipeline_id.clone(), tcp_counter_c);
                         tcp_counters_s.insert(pipeline_id, tcp_counter_s);
                     }
-                    Ok(MessageTo::CRecords(pipeline_id, con_records_c, con_records_s)) => {
-                        debug!("{}: received CRecords", pipeline_id);
-                        con_records.insert(pipeline_id, (con_records_c, con_records_s));
+                    Ok(MessageTo::CRecords(pipeline_id, Some(recv_con_records), _)) => {
+                        debug!("{}: received {} CRecords", pipeline_id, recv_con_records.len());
+                        con_records.insert(pipeline_id, recv_con_records);
                     }
                     Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
                     Err(RecvTimeoutError::Timeout) => {
@@ -250,54 +256,70 @@ fn delayed_binding_proxy() {
                 }
             }
 
-            for (p, (c_records_c, _c_records_s)) in &con_records {
+            for (p, c_records) in &con_records {
                 info!("Pipeline {}:", p);
-                if c_records_c.len() > 0 {
+                if c_records.len() > 0 {
                     let mut completed_count = 0;
-                    let mut min = c_records_c.iter().last().unwrap();
+                    let mut min = c_records.iter().last().unwrap();
                     let mut max = min;
-                    c_records_c.iter().enumerate().for_each(|(i, c)| {
+                    c_records.iter().enumerate().for_each(|(i, c)| {
                         info!("{:6}: {}", i, c);
-                        if (c.get_release_cause() == ReleaseCause::PassiveClose || c.get_release_cause() == ReleaseCause::ActiveClose) && c.states().last().unwrap() == &TcpState::Closed {
+                        if (c.release_cause() == ReleaseCause::PassiveClose
+                            || c.release_cause() == ReleaseCause::ActiveClose)
+                            && c.states().last().unwrap() == &TcpState::Closed
+                        {
                             completed_count += 1
                         }
-                        if c.get_first_stamp().unwrap_or(u64::max_value()) < min.get_first_stamp().unwrap_or(u64::max_value()) { min = c }
-                        if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) { max = c }
-                        if i == (c_records_c.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some() {
+                        if c.get_first_stamp().unwrap_or(u64::max_value())
+                            < min.get_first_stamp().unwrap_or(u64::max_value())
+                        {
+                            min = c
+                        }
+                        if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
+                            max = c
+                        }
+                        if i == (c_records.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some()
+                        {
                             let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
-                            info!("total used cycles= {}, per connection = {}", total.separated_string(), (total / (i as u64 + 1)).separated_string());
+                            info!(
+                                "total used cycles= {}, per connection = {}",
+                                total.separated_string(),
+                                (total / (i as u64 + 1)).separated_string()
+                            );
                         }
                     });
                 }
             }
 
-
             let mut completed_count_c = 0;
-            for (_p, (con_recs, _)) in &con_records {
-                for c in con_recs.iter() {
-                    if c.get_release_cause() == ReleaseCause::ActiveClose
-                        && c.last_state() == TcpState::Closed
-                        {
-                            completed_count_c += 1
-                        };
-                    assert_eq!(c.states(), [TcpState::Closed, TcpState::SynSent, TcpState::Established, TcpState::FinWait1, TcpState::Closed]);
-                }
-            }
-
-
             let mut completed_count_s = 0;
-            for (_p, (_, con_recs)) in &con_records{
+            for (_p, con_recs) in &con_records {
                 for c in con_recs.iter() {
-                    if c.get_release_cause() == ReleaseCause::PassiveClose
-                        && c.last_state() == TcpState::Closed
-                        {
-                            completed_count_s += 1
-                        };
-                    assert_eq!(c.states(), [TcpState::Listen, TcpState::SynReceived, TcpState::LastAck, TcpState::Closed]);
+                    if c.release_cause() == ReleaseCause::ActiveClose && c.last_state() == TcpState::Closed {
+                        completed_count_c += 1
+                    };
+                    assert_eq!(
+                        c.states(),
+                        [
+                            TcpState::Closed,
+                            TcpState::SynSent,
+                            TcpState::Established,
+                            TcpState::FinWait1,
+                            TcpState::Closed
+                        ]
+                    );
+                    if c.release_cause2() == ReleaseCause::PassiveClose && c.last_state2() == TcpState::Closed {
+                        completed_count_s += 1
+                    };
+                    assert_eq!(
+                        c.states2(),
+                        [TcpState::Listen, TcpState::SynReceived, TcpState::LastAck, TcpState::Closed]
+                    );
                 }
             }
 
-            info!("completed connections c/s: {}/{}", completed_count_c, completed_count_s );
+
+            info!("completed connections c/s: {}/{}", completed_count_c, completed_count_s);
             assert_eq!(completed_count_c, configuration.test_size.unwrap() * CLIENT_THREADS);
             assert_eq!(completed_count_s, configuration.test_size.unwrap() * CLIENT_THREADS);
 
