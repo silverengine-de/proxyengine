@@ -20,7 +20,7 @@ extern crate netfcts;
 mod nftcp;
 mod cmanager;
 
-pub use cmanager::{Connection, Extension, ProxyRecStore};
+pub use cmanager::{ProxyConnection, Extension, ProxyRecStore};
 
 use netfcts::tasks::TaskType;
 use netfcts::tasks::KniHandleRequest;
@@ -81,6 +81,7 @@ pub struct EngineConfig {
     pub ipnet: String,
     pub timeouts: Option<Timeouts>,
     pub port: u16,
+    pub detailed_records: Option<bool>,
 }
 
 impl EngineConfig {
@@ -210,8 +211,8 @@ pub fn setup_pipelines<F1, F2>(
     f_select_server: F1,
     f_process_payload_c_s: F2,
 ) where
-    F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
-    F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + Sync + 'static,
+    F1: Fn(&mut ProxyConnection) + Sized + Send + Sync + 'static,
+    F2: Fn(&mut ProxyConnection, &mut [u8], usize) + Sized + Send + Sync + 'static,
 {
     let mut kni: Option<&CacheAligned<PortQueue>> = None;
     let mut pci: Option<&CacheAligned<PortQueue>> = None;
@@ -388,7 +389,15 @@ pub fn spawn_recv_thread(
                         s.send(MessageTo::FetchCRecords).unwrap();
                     }
                 }
-
+                Ok(MessageFrom::TimeStamps(p, t0, t1)) => {
+                    if reply_to_main.is_some() {
+                        reply_to_main
+                            .as_ref()
+                            .unwrap()
+                            .send(MessageTo::TimeStamps(p, t0, t1))
+                            .unwrap();
+                    };
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(e) => {
                     error!("error receiving from message channel: {}", e);

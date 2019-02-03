@@ -49,11 +49,11 @@ use netfcts::io::{ print_tcp_counters };
 #[cfg(feature = "profiling")]
 use netfcts::io::print_rx_tx_counters;
 use netfcts::system::get_mac_from_ifname;
-use netfcts::{ConRecordOperations, HasTcpState, HasConData, ConRecord};
+use netfcts::{HasTcpState, HasConData, ConRecord};
 
 use tcp_proxy::{read_config, setup_pipelines};
-use tcp_proxy::{Connection, ProxyRecStore, Extension};
-use tcp_proxy::Container;
+use tcp_proxy::{ProxyConnection, ProxyRecStore, Extension};
+//use tcp_proxy::Container;
 use tcp_proxy::spawn_recv_thread;
 
 pub fn main() {
@@ -121,8 +121,6 @@ pub fn main() {
     };
     let mut netbricks_configuration = read_matches(&matches, &opts);
 
-    //  let (tx, rx) = channel::<TcpEvent>();
-
     let l234data: Vec<L234Data> = configuration
         .targets
         .iter()
@@ -140,7 +138,7 @@ pub fn main() {
 
     let l234data_clone = l234data.clone();
     // this is the closure, which selects the target server to use for a new TCP connection
-    let f_select_server = move |c: &mut Connection| {
+    let f_select_server = move |c: &mut ProxyConnection| {
         //let cdata: CData = serde_json::from_slice(&c.payload).expect("cannot deserialize CData");
         //no_calls +=1;
         let cdata: CData = bincode::deserialize::<CData>(c.payload_packet.as_ref().unwrap().get_payload())
@@ -148,20 +146,21 @@ pub fn main() {
 
         for (i, l234) in l234data_clone.iter().enumerate() {
             if l234.port == cdata.reply_socket.port() && l234.ip == u32::from(*cdata.reply_socket.ip()) {
-                c.set_server_index(i);
+                c.set_server_index(i as u8);
                 break;
             }
         }
-
+/*
         if let Some(_) = c.userdata {
             c.userdata.as_mut().unwrap().init();
         } else {
             c.userdata = Some(Container::new());
         }
+*/
     };
 
     // this is the closure, which may modify the payload of client to server packets in a TCP connection
-    let f_process_payload_c_s = |_c: &mut Connection, _payload: &mut [u8], _tailroom: usize| {};
+    let f_process_payload_c_s = |_c: &mut ProxyConnection, _payload: &mut [u8], _tailroom: usize| {};
 
     fn check_system(context: NetBricksContext) -> Result<NetBricksContext> {
         for port in context.ports.values() {
@@ -193,7 +192,7 @@ pub fn main() {
             let (mtx, mrx) = channel::<MessageFrom<ProxyRecStore>>();
             let (reply_mtx, reply_mrx) = channel::<MessageTo<ProxyRecStore>>();
 
-            let proxy_config_cloned = configuration.clone();
+            let configuration_clone = configuration.clone();
             let system_data_cloned = system_data.clone();
             let mtx_clone = mtx.clone();
 
@@ -203,7 +202,7 @@ pub fn main() {
                         core,
                         p,
                         s,
-                        &proxy_config_cloned.engine,
+                        &configuration_clone.engine,
                         l234data.clone(),
                         flowdirector_map.clone(),
                         mtx_clone.clone(),
@@ -216,7 +215,7 @@ pub fn main() {
 
             let cores = context.active_cores.clone();
 
-            spawn_recv_thread(mrx, context, configuration);
+            spawn_recv_thread(mrx, context, configuration.clone());
             mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
             // debug output on flow director:
             if log_enabled!(log::Level::Debug) {
@@ -226,7 +225,8 @@ pub fn main() {
             }
 
             info!(
-                "Connection record sizes = {} + {}",
+                "Connection record sizes = {} + {} + {}",
+                mem::size_of::<ProxyConnection>(),
                 mem::size_of::<ConRecord>(),
                 mem::size_of::<Extension>()
             );
@@ -242,7 +242,7 @@ pub fn main() {
             thread::sleep(Duration::from_millis(1000 as u64));
 
             mtx.send(MessageFrom::FetchCounter).unwrap();
-            mtx.send(MessageFrom::FetchCRecords).unwrap();
+            if configuration.engine.detailed_records.unwrap_or(false) { mtx.send(MessageFrom::FetchCRecords).unwrap(); }
 
             let mut tcp_counters_c = HashMap::new();
             let mut tcp_counters_s = HashMap::new();
@@ -252,8 +252,8 @@ pub fn main() {
                 match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
                     Ok(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s, _rx_tx_stats)) => {
                         print_tcp_counters(&pipeline_id, &tcp_counter_c, &tcp_counter_s);
-                        #[cfg(feature = "profiling")]
-                        print_rx_tx_counters(&pipeline_id, &_rx_tx_stats.unwrap());
+                        //#[cfg(feature = "profiling")]
+                        //print_rx_tx_counters(&pipeline_id, &_rx_tx_stats.unwrap());
                         tcp_counters_c.insert(pipeline_id.clone(), tcp_counter_c);
                         tcp_counters_s.insert(pipeline_id, tcp_counter_s);
                     }
@@ -272,76 +272,78 @@ pub fn main() {
                 }
             }
 
-            let mut completed_count_c = 0;
-            let mut completed_count_s = 0;
-            for (_p, con_recs) in &con_records {
-                for c in con_recs.iter_0() {
-                    if (c.release_cause() == ReleaseCause::PassiveClose || c.release_cause() == ReleaseCause::ActiveClose)
-                        && c.last_state() == TcpState::Closed
-                    {
-                        completed_count_c += 1
-                    };
-                }
-                for c in con_recs.iter_1() {
-                    if (c.release_cause() == ReleaseCause::PassiveClose || c.release_cause() == ReleaseCause::ActiveClose)
-                        && c.last_state() == TcpState::Closed
-                    {
-                        completed_count_s += 1
-                    };
-                }
-            }
-
-            info!("completed connections c/s: {}/{}", completed_count_c, completed_count_s);
-
-            // write connection records into a file:
-            let mut file = match File::create("c_records.txt") {
-                Err(why) => panic!("couldn't create c_records.txt: {}", why.description()),
-                Ok(file) => file,
-            };
-            let mut f = BufWriter::new(file);
-
-            for (p, mut c_records) in con_records {
-                info!("Pipeline {}:", p);
-                f.write_all(format!("Pipeline {}:\n", p).as_bytes())
-                    .expect("cannot write c_records");
-
-                if c_records.len() > 0 {
-                    let mut completed_count = 0;
-                    let mut min = c_records.iter_0().last().unwrap().clone();
-                    let mut max = min.clone();
-                    c_records.sort_0_by(|a, b| a.sock().1.cmp(&b.sock().1));
-
-                    c_records.iter_0().enumerate().for_each(|(i, c)| {
-                        let line = format!("{:6}: {}\n", i, c);
-                        f.write_all(line.as_bytes()).expect("cannot write c_records");
-
-                        if (c.release_cause() == ReleaseCause::PassiveClose
-                            || c.release_cause() == ReleaseCause::ActiveClose)
-                            && c.states().last().unwrap() == &TcpState::Closed
+            if configuration.engine.detailed_records.unwrap_or(false) {
+                let mut completed_count_c = 0;
+                let mut completed_count_s = 0;
+                for (_p, con_recs) in &con_records {
+                    for c in con_recs.iter_0() {
+                        if (c.release_cause() == ReleaseCause::PassiveClose || c.release_cause() == ReleaseCause::ActiveClose)
+                            && c.last_state() == TcpState::Closed
                         {
-                            completed_count += 1
-                        }
-                        if c.get_first_stamp().unwrap_or(u64::max_value())
-                            < min.get_first_stamp().unwrap_or(u64::max_value())
+                            completed_count_c += 1
+                        };
+                    }
+                    for c in con_recs.iter_1() {
+                        if (c.release_cause() == ReleaseCause::PassiveClose || c.release_cause() == ReleaseCause::ActiveClose)
+                            && c.last_state() == TcpState::Closed
                         {
-                            min = c.clone()
-                        }
-                        if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
-                            max = c.clone()
-                        }
-                        if i == (c_records.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some() {
-                            let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
-                            info!(
-                                "total used cycles= {}, per connection = {}",
-                                total.separated_string(),
-                                (total / (i as u64 + 1)).separated_string()
-                            );
-                        }
-                    });
+                            completed_count_s += 1
+                        };
+                    }
                 }
-            }
 
-            f.flush().expect("cannot flush BufWriter");
+                info!("completed connections c/s: {}/{}", completed_count_c, completed_count_s);
+
+                // write connection records into a file:
+                let mut file = match File::create("c_records.txt") {
+                    Err(why) => panic!("couldn't create c_records.txt: {}", why.description()),
+                    Ok(file) => file,
+                };
+                let mut f = BufWriter::new(file);
+
+                for (p, mut c_records) in con_records {
+                    info!("Pipeline {}:", p);
+                    f.write_all(format!("Pipeline {}:\n", p).as_bytes())
+                        .expect("cannot write c_records");
+
+                    if c_records.len() > 0 {
+                        let mut completed_count = 0;
+                        let mut min = c_records.iter_0().last().unwrap().clone();
+                        let mut max = min.clone();
+                        c_records.sort_0_by(|a, b| a.sock().1.cmp(&b.sock().1));
+
+                        c_records.iter_0().enumerate().for_each(|(i, c)| {
+                            let line = format!("{:6}: {}\n", i, c);
+                            f.write_all(line.as_bytes()).expect("cannot write c_records");
+
+                            if (c.release_cause() == ReleaseCause::PassiveClose
+                                || c.release_cause() == ReleaseCause::ActiveClose)
+                                && c.states().last().unwrap() == &TcpState::Closed
+                            {
+                                completed_count += 1
+                            }
+                            if c.get_first_stamp().unwrap_or(u64::max_value())
+                                < min.get_first_stamp().unwrap_or(u64::max_value())
+                            {
+                                min = c.clone()
+                            }
+                            if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
+                                max = c.clone()
+                            }
+                            if i == (c_records.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some() {
+                                let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
+                                info!(
+                                    "total used cycles= {}, per connection = {}",
+                                    total.separated_string(),
+                                    (total / (i as u64 + 1)).separated_string()
+                                );
+                            }
+                        });
+                    }
+                }
+
+                f.flush().expect("cannot flush BufWriter");
+            }
             mtx.send(MessageFrom::Exit).unwrap();
 
             info!("terminating ProxyEngine ...");

@@ -37,9 +37,9 @@ use netfcts::initialize_flowdirector;
 use netfcts::tcp_common::{ReleaseCause, L234Data, TcpState};
 use netfcts::system::{SystemData, get_mac_from_ifname};
 use netfcts::io::{ print_tcp_counters, print_rx_tx_counters};
-use netfcts::{ConRecordOperations, HasTcpState};
+use netfcts::{HasTcpState};
 
-use tcp_proxy::{Connection, ProxyRecStore};
+use tcp_proxy::{ProxyConnection, ProxyRecStore};
 use tcp_proxy::{read_config};
 use netfcts::comm::{MessageFrom, MessageTo};
 use tcp_proxy::spawn_recv_thread;
@@ -125,17 +125,17 @@ fn delayed_binding_proxy() {
     let proxy_config_cloned = configuration.clone();
     let l234data_clone = l234data.clone();
     // this is the closure, which selects the target server to use for a new TCP connection
-    let f_select_server = move |c: &mut Connection| {
+    let f_select_server = move |c: &mut ProxyConnection| {
         let s = String::from_utf8(c.payload_packet.as_ref().unwrap().get_payload().to_vec()).unwrap();
         // read first item in string and convert to usize:
         let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
         let remainder = stars % l234data_clone.len();
-        c.set_server_index(remainder);
+        c.set_server_index(remainder as u8);
         debug!("selecting {}", proxy_config_cloned.targets[remainder].id);
     };
 
     // this is the closure, which may modify the payload of client to server packets in a TCP connection
-    let f_process_payload_c_s = |_c: &mut Connection, _payload: &mut [u8], _tailroom: usize| {};
+    let f_process_payload_c_s = |_c: &mut ProxyConnection, _payload: &mut [u8], _tailroom: usize| {};
 
     match initialize_system(&mut netbricks_configuration) {
         Ok(mut context) => {
