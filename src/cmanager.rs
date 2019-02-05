@@ -1,5 +1,5 @@
 use std::net::Ipv4Addr;
-use std::collections::VecDeque;
+use std::collections::{VecDeque, BTreeMap};
 use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
 use std::fmt;
 use std::mem;
@@ -19,7 +19,7 @@ use netfcts::Store64;
 use netfcts::{Storable, SimpleStore, HasTcpState};
 use netfcts::TIME_STAMP_REDUCTION_FACTOR;
 use netfcts::utils::shuffle_ports;
-use netfcts::utils::Sock2Index;
+//use netfcts::utils::Sock2Index;
 #[cfg(feature = "profiling")]
 use netfcts::utils::TimeAdder;
 
@@ -450,7 +450,8 @@ pub static GLOBAL_MANAGER_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
 
 pub struct ConnectionManager {
     record_store: Rc<RefCell<ProxyRecStore>>,
-    sock2port: Sock2Index,
+//    sock2port: Sock2Index,
+    sock2port: BTreeMap<(u32,u16), u16>,
     #[cfg(feature = "profiling")]
     time_adder: TimeAdder,
     //sock2port: HashMap<(u32, u16), u16>,
@@ -476,7 +477,8 @@ impl ConnectionManager {
         let store = Rc::new(RefCell::new(Store64::with_capacity(MAX_RECORDS)));
         let mut cm = ConnectionManager {
             record_store: store.clone(),
-            sock2port: Sock2Index::new(),
+//            sock2port: Sock2Index::new(),
+            sock2port: BTreeMap::new(),
             #[cfg(feature = "profiling")]
             time_adder: TimeAdder::new_with_warm_up("connection initialize", 100000, 100),
             free_ports: {

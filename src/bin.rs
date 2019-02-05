@@ -345,7 +345,7 @@ pub fn main() {
                 f.flush().expect("cannot flush BufWriter");
             }
             mtx.send(MessageFrom::Exit).unwrap();
-
+            thread::sleep(Duration::from_millis(200 as u64)); // give threads some time to process Exit
             info!("terminating ProxyEngine ...");
             std::process::exit(0);
         }

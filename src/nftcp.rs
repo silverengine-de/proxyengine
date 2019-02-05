@@ -108,7 +108,7 @@ pub fn setup_forwarder<F1, F2>(
     }
 
     // we need this queue for the delayed bindrequest
-    let (producer, consumer) = new_mpsc_queue_pair();
+    let (mut producer, consumer) = new_mpsc_queue_pair();
 
     // setting up a a reverse message channel between this pipeline and the main program thread
     debug!("{} setting up reverse channel", pipeline_id);
@@ -188,7 +188,7 @@ pub fn setup_forwarder<F1, F2>(
             ];
         }
 
-    let group_by_closure =
+    let delayed_binding_closure =
         // this is the main closure containing the proxy service logic
         box move |packet_in: &mut Packet<MacHeader, EmptyMetadata>| {
             // this is the major closure for TCP processing
@@ -422,10 +422,7 @@ pub fn setup_forwarder<F1, F2>(
             #[cfg(feature = "profiling")]
                 let timestamp_entry = utils::rdtsc_unsafe();
 
-            // need to clone here, as this closure must be an FnMut, not only FnOnce:
-            let mut producer = producer.clone();
-
-            // we must do the parsing on a clone of the borrowed packet, as we need to move it for this
+            // we must do the parsing on a clone of the borrowed packet, as we need to move it for this purpose
             // we release the clone within this closure, so we do not care about mbuf refcount
             let p_mac = packet_in.clone_without_ref_counting();
             let b_private_etype = private_etype(&packet_in.get_header().etype());
@@ -831,7 +828,7 @@ pub fn setup_forwarder<F1, F2>(
     let mut l4groups =
         l2_input_stream
             .parse::<MacHeader>()
-            .group_by(3, group_by_closure, sched, "L4-Groups".to_string(), uuid_l4groupby);
+            .group_by(3, delayed_binding_closure, sched, "L4-Groups".to_string(), uuid_l4groupby);
 
     let pipe2kni = l4groups.get_group(2).unwrap().send(kni.clone());
     let l4pciflow = l4groups.get_group(1).unwrap().compose();
