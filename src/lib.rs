@@ -36,7 +36,7 @@ use e2d2::interface::{PortQueue, PmdPort, FlowDirector};
 
 use netfcts::errors::*;
 use netfcts::io::print_hard_statistics;
-use nftcp::setup_forwarder;
+use nftcp::setup_delayed_proxy;
 use netfcts::{is_kni_core, setup_kni, FlowSteeringMode};
 use netfcts::comm::{MessageFrom, MessageTo, PipelineId};
 use netfcts::system::SystemData;
@@ -73,6 +73,12 @@ impl Configuration {
     }
 }
 
+#[derive(Deserialize, Clone, PartialEq)]
+pub enum ProxyMode {
+    DelayedV0,
+    Delayed,
+}
+
 #[derive(Deserialize, Clone)]
 pub struct EngineConfig {
     pub flow_steering: Option<FlowSteeringMode>,
@@ -82,6 +88,7 @@ pub struct EngineConfig {
     pub timeouts: Option<Timeouts>,
     pub port: u16,
     pub detailed_records: Option<bool>,
+    pub mode: Option<ProxyMode>,
 }
 
 impl EngineConfig {
@@ -199,13 +206,13 @@ impl Container {
     }
 }
 
-pub fn setup_pipelines<F1, F2>(
+pub fn setup_pipes_delayed_proxy<F1, F2>(
     core: i32,
     ports: HashSet<CacheAligned<PortQueue>>,
     sched: &mut StandaloneScheduler,
     engine_config: &EngineConfig,
     servers: Vec<L234Data>,
-    flowdirector_map: HashMap<i32, Arc<FlowDirector>>,
+    flowdirector_map: HashMap<u16, Arc<FlowDirector>>,
     tx: Sender<MessageFrom<ProxyRecStore>>,
     system_data: SystemData,
     f_select_server: F1,
@@ -256,11 +263,11 @@ pub fn setup_pipelines<F1, F2>(
                     last_tick: 0,
                 },
             )
-            .move_ready(), // this task must be ready from the beginning to enable managing the KNI i/f
+                .move_ready(), // this task must be ready from the beginning to enable managing the KNI i/f
         );
     }
 
-    setup_forwarder(
+    setup_delayed_proxy(
         core,
         pci.unwrap(),
         kni.unwrap(),
@@ -410,25 +417,25 @@ pub fn spawn_recv_thread(
                 .as_ref()
                 .unwrap()
                 .recv_timeout(Duration::from_millis(10))
-            {
-                Ok(SchedulerReply::PerformanceData(core, map)) => {
-                    for d in map {
-                        info!(
-                            "{:2}: {:20} {:>15} count= {:12}, queue length= {}",
-                            core,
-                            (d.1).0,
-                            (d.1).1.separated_string(),
-                            (d.1).2.separated_string(),
-                            (d.1).3
-                        )
+                {
+                    Ok(SchedulerReply::PerformanceData(core, map)) => {
+                        for d in map {
+                            info!(
+                                "{:2}: {:20} {:>15} count= {:12}, queue length= {}",
+                                core,
+                                (d.1).0,
+                                (d.1).1.separated_string(),
+                                (d.1).2.separated_string(),
+                                (d.1).3
+                            )
+                        }
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(e) => {
+                        error!("error receiving from SchedulerReply channel: {}", e);
+                        break;
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(e) => {
-                    error!("error receiving from SchedulerReply channel: {}", e);
-                    break;
-                }
-            }
         }
         info!("exiting recv thread ...");
     });

@@ -51,8 +51,8 @@ use netfcts::io::print_rx_tx_counters;
 use netfcts::system::get_mac_from_ifname;
 use netfcts::{HasTcpState, HasConData, ConRecord};
 
-use tcp_proxy::{read_config, setup_pipelines};
-use tcp_proxy::{ProxyConnection, ProxyRecStore, Extension};
+use tcp_proxy::{read_config, setup_pipes_delayed_proxy};
+use tcp_proxy::{ProxyConnection, ProxyRecStore, Extension, ProxyMode};
 //use tcp_proxy::Container;
 use tcp_proxy::spawn_recv_thread;
 
@@ -138,7 +138,7 @@ pub fn main() {
 
     let l234data_clone = l234data.clone();
     // this is the closure, which selects the target server to use for a new TCP connection
-    let f_select_server = move |c: &mut ProxyConnection| {
+    let f_by_payload = move |c: &mut ProxyConnection| {
         //let cdata: CData = serde_json::from_slice(&c.payload).expect("cannot deserialize CData");
         //no_calls +=1;
         let cdata: CData = bincode::deserialize::<CData>(c.payload_packet.as_ref().unwrap().get_payload())
@@ -157,6 +157,17 @@ pub fn main() {
             c.userdata = Some(Container::new());
         }
 */
+    };
+
+    let no_servers= l234data.len();
+    let mut last_server: u8 = 0;
+    let _f_round_robbin = move |c: &mut ProxyConnection| {
+        if (last_server as usize) < no_servers-1 {
+            last_server +=1;
+        } else {
+            last_server = 0;
+        }
+        c.set_server_index(last_server);
     };
 
     // this is the closure, which may modify the payload of client to server packets in a TCP connection
@@ -196,22 +207,26 @@ pub fn main() {
             let system_data_cloned = system_data.clone();
             let mtx_clone = mtx.clone();
 
-            context.add_pipeline_to_run(Box::new(
-                move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
-                    setup_pipelines(
-                        core,
-                        p,
-                        s,
-                        &configuration_clone.engine,
-                        l234data.clone(),
-                        flowdirector_map.clone(),
-                        mtx_clone.clone(),
-                        system_data_cloned.clone(),
-                        f_select_server.clone(),
-                        f_process_payload_c_s.clone(),
-                    );
-                },
-            ));
+            if *configuration.engine.mode.as_ref().unwrap_or(&ProxyMode::Delayed) == ProxyMode::Delayed {
+                context.add_pipeline_to_run(Box::new(
+                    move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
+                        setup_pipes_delayed_proxy(
+                            core,
+                            p,
+                            s,
+                            &configuration_clone.engine,
+                            l234data.clone(),
+                            flowdirector_map.clone(),
+                            mtx_clone.clone(),
+                            system_data_cloned.clone(),
+                            f_by_payload.clone(),
+                            f_process_payload_c_s.clone(),
+                        );
+                    },
+                ));
+            } else { // simple proxy
+                error!("simple proxy still not implemented");
+            }
 
             let cores = context.active_cores.clone();
 
@@ -233,8 +248,11 @@ pub fn main() {
 
             //main loop
             println!("press ctrl-c to terminate proxy ...");
+            let mut loops: usize = 300;
             while running.load(Ordering::SeqCst) {
+                if loops == 300 { loops= 0; info!("available mbufs in memory pool= {:6}", unsafe { mbuf_avail_count()} ); }
                 thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
+                loops+= 1;
             }
 
             println!("\nTask Performance Data:\n");

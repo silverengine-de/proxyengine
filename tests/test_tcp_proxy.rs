@@ -42,9 +42,9 @@ use netfcts::system::{SystemData, get_mac_from_ifname};
 use netfcts::io::{ print_tcp_counters, print_rx_tx_counters};
 use netfcts::{HasTcpState, ConRecord};
 
-use tcp_proxy::{ProxyConnection, ProxyRecStore, Extension};
+use tcp_proxy::{ProxyConnection, ProxyRecStore, Extension, ProxyMode};
 use tcp_proxy::{read_config};
-use tcp_proxy::setup_pipelines;
+use tcp_proxy::{setup_pipes_delayed_proxy};
 use netfcts::comm::{MessageFrom, MessageTo};
 use tcp_proxy::spawn_recv_thread;
 
@@ -128,13 +128,26 @@ fn delayed_binding_proxy() {
     let proxy_config_cloned = configuration.clone();
     let l234data_clone = l234data.clone();
     // this is the closure, which selects the target server to use for a new TCP connection
-    let f_select_server = move |c: &mut ProxyConnection| {
+    let f_by_payload= move |c: &mut ProxyConnection| {
         let s = String::from_utf8(c.payload_packet.as_ref().unwrap().get_payload().to_vec()).unwrap();
         // read first item in string and convert to usize:
         let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
         let remainder = stars % l234data_clone.len();
         c.set_server_index(remainder as u8);
         debug!("selecting {}", proxy_config_cloned.targets[remainder].id);
+    };
+
+
+    let no_servers= l234data.len();
+    let mut last_server: u8 = 0;
+    let _f_round_robbin = move |c: &mut ProxyConnection| {
+        if (last_server as usize) < no_servers-1 {
+            last_server +=1;
+        } else {
+            last_server = 0;
+        }
+        c.set_server_index(last_server);
+        debug!("round robin select {}", last_server);
     };
 
     // this is the closure, which may modify the payload of client to server packets in a TCP connection
@@ -174,26 +187,31 @@ fn delayed_binding_proxy() {
             let (mtx, mrx) = channel::<MessageFrom<ProxyRecStore>>();
             let (reply_mtx, reply_mrx) = channel::<MessageTo<ProxyRecStore>>();
 
-            let proxy_config_cloned = configuration.clone();
+            let configuration_clone = configuration.clone();
             let system_data_cloned = system_data.clone();
             let mtx_clone = mtx.clone();
 
-            context.add_pipeline_to_run(Box::new(
-                move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
-                    setup_pipelines(
-                        core,
-                        p,
-                        s,
-                        &proxy_config_cloned.engine,
-                        l234data.clone(),
-                        flowdirector_map.clone(),
-                        mtx_clone.clone(),
-                        system_data_cloned.clone(),
-                        f_select_server.clone(),
-                        f_process_payload_c_s.clone(),
-                    );
-                },
-            ));
+            if *configuration.engine.mode.as_ref().unwrap_or(&ProxyMode::Delayed) == ProxyMode::Delayed {
+                context.add_pipeline_to_run(Box::new(
+                    move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
+                        setup_pipes_delayed_proxy(
+                            core,
+                            p,
+                            s,
+                            &configuration_clone.engine,
+                            l234data.clone(),
+                            flowdirector_map.clone(),
+                            mtx_clone.clone(),
+                            system_data_cloned.clone(),
+                            f_by_payload.clone(),
+                            f_process_payload_c_s.clone(),
+                        );
+                    },
+                ));
+
+            } else { // simple proxy
+                error!("simple proxy still not implemented");
+            }
 
             let cores = context.active_cores.clone();
 
@@ -207,6 +225,8 @@ fn delayed_binding_proxy() {
                 mem::size_of::<ConRecord>(),
                 mem::size_of::<Extension>()
             );
+
+            info!("before run: available mbufs in memory pool= {:6}", unsafe { mbuf_avail_count()} );
 
             // set up servers
             for server in configuration.targets {
@@ -242,7 +262,7 @@ fn delayed_binding_proxy() {
 
             // emulate clients
 
-            let timeout = Duration::from_millis(1000 as u64);
+            let timeout = Duration::from_millis(2000 as u64);
 
             for ntry in 0..configuration.test_size.unwrap() {
                 match TcpStream::connect_timeout(
@@ -282,7 +302,7 @@ fn delayed_binding_proxy() {
 
             thread::sleep(Duration::from_millis(200)); // Sleep for a bit
 
-            println!("\nTask Performance Data:\n");
+
             mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
             thread::sleep(Duration::from_millis(1000 as u64));
 
@@ -318,6 +338,10 @@ fn delayed_binding_proxy() {
                 }
             }
 
+
+            info!("after run: available mbufs in memory pool= {:6}", unsafe { mbuf_avail_count()} );
+            println!("\nTask Performance Data:\n");
+
             if configuration.engine.detailed_records.unwrap_or(false) {
                 let mut completed_count_c = 0;
                 let mut completed_count_s = 0;
@@ -339,9 +363,6 @@ fn delayed_binding_proxy() {
                 }
 
                 println!("\ncompleted connections c/s: {}/{}\n", completed_count_c, completed_count_s);
-
-                assert_eq!(configuration.test_size.unwrap(), completed_count_c);
-                assert_eq!(configuration.test_size.unwrap(), completed_count_s);
 
                 // write connection records into file
                 let mut file = match File::create("c_records.txt") {
@@ -393,7 +414,14 @@ fn delayed_binding_proxy() {
 
                     }
                 }
+
+
                 f.flush().expect("cannot flush BufWriter");
+
+
+                assert_eq!(configuration.test_size.unwrap(), completed_count_c);
+                assert_eq!(configuration.test_size.unwrap(), completed_count_s);
+
             }
 
             for (p, counters) in tcp_counters_s {

@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use e2d2::headers::TcpHeader;
 use e2d2::allocators::CacheAligned;
-use e2d2::interface::{PacketRx, PortQueue, L4Flow, Packet};
+use e2d2::interface::{PortQueue, L4Flow, Packet};
 use e2d2::common::EmptyMetadata;
 use e2d2::utils;
 
@@ -138,6 +138,7 @@ pub union Seqn {
 
 pub struct ProxyConnection {
     pub payload_packet: Option<Box<Packet<TcpHeader, EmptyMetadata>>>,
+    //pub payload: Box<Vec<u8>>,
     detailed_c: Option<Box<DetailedConnection>>,
     pub client_mac: MacAddress,
     client_port: u16,
@@ -151,8 +152,8 @@ pub struct ProxyConnection {
     /// current ack no towards client (=expected seqn)
     pub ackn_p2c: u32,
     pub seqn: Seqn,
-    /// number of bytes inserted by proxy in connection from client to server
-    pub c2s_inserted_bytes: u32,
+    /// number of bytes inserted/removed by proxy in connection from client to server
+    pub c2s_inserted_bytes: i32,
     /// latest seqn of FIN seen for proxy to server
     pub seqn_fin_p2s: u32,
     /// egress proxy port assigned to this connection
@@ -169,6 +170,7 @@ impl ProxyConnection {
     fn new() -> ProxyConnection {
         ProxyConnection {
             payload_packet: None,
+            //payload: Box::new(Vec::with_capacity(1500)),
             detailed_c: None,
             //userdata: None,
             client_mac: MacAddress::default(),
@@ -192,6 +194,7 @@ impl ProxyConnection {
     fn initialize(&mut self, client_sock: &(u32, u16), proxy_port: u16) {
         //self.userdata = None;
         self.payload_packet = None;
+        //self.payload.clear();
         self.client_mac = MacAddress::default();
         self.c_seqn = 0;
         self.seqn.f_seqn = 0;
@@ -330,7 +333,7 @@ impl ProxyConnection {
 
 pub struct DetailedConnection {
     //Box makes the trait object sizeable
-    ///can be used by applications to store application specific connection state
+    //can be used by applications to store application specific connection state
     //pub userdata: Option<Box<UserData>>,
     con_rec: Option<usize>,
     store: Option<Rc<RefCell<ProxyRecStore>>>,
@@ -498,7 +501,7 @@ impl ConnectionManager {
             "created ConnectionManager {} (detailed_records = {:?}) for port {}, rxq {}, ip= {}, tcp ports {} - {}",
             old_manager_count,
             detailed_records,
-            PacketRx::port_id(&cm.pci),
+            cm.pci.port_id(),
             cm.pci.rxq(),
             Ipv4Addr::from(ip),
             if tcp_port_base == 0 { 1 } else { tcp_port_base },
@@ -658,7 +661,7 @@ impl ConnectionManager {
                 let c = c.unwrap();
                 c.set_release_cause(ReleaseCause::Timeout);
                 c.c_push_state(TcpState::Closed);
-                debug!("timing out port {} at {:?}", port, c.wheel_slot_and_index);
+                warn!("timing out port {}, sock {:?} at {:?}", port, c.sock().unwrap_or((0,0)), c.wheel_slot_and_index);
                 sock = c.sock();
                 c.release();
                 release = true;

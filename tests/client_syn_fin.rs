@@ -43,7 +43,7 @@ use tcp_proxy::{ProxyConnection, ProxyRecStore};
 use tcp_proxy::{read_config};
 use netfcts::comm::{MessageFrom, MessageTo};
 use tcp_proxy::spawn_recv_thread;
-use tcp_proxy::setup_pipelines;
+use tcp_proxy::setup_pipes_delayed_proxy;
 
 #[test]
 fn delayed_binding_proxy() {
@@ -154,7 +154,7 @@ fn delayed_binding_proxy() {
 
             context.add_pipeline_to_run(Box::new(
                 move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
-                    setup_pipelines(
+                    setup_pipes_delayed_proxy(
                         core,
                         p,
                         s,
