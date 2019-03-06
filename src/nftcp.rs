@@ -227,7 +227,7 @@ pub fn setup_delayed_proxy<F1, F2>(
                 c.client_mac = h.mac.src;
                 //c.set_sock((h.ip.src(), h.tcp.src_port())); this is redundant, as sock is set when c is allocated
                 remove_tcp_options(p, h);
-                make_reply_packet(h, 1);
+                make_reply_packet(p, h, 1);
                 //generate seq number:
                 c.c_seqn = (utils::rdtsc_unsafe() << 8) as u32;
                 h.tcp.set_seq_num(c.c_seqn);
@@ -418,7 +418,7 @@ pub fn setup_delayed_proxy<F1, F2>(
                 let delta = c.c_seqn.wrapping_sub(h.tcp.seq_num());
                 c.c_seqn = delta;
                 remove_tcp_options(p, h);
-                make_reply_packet(h, 1);
+                make_reply_packet(p, h, 1);
                 h.tcp.unset_syn_flag();
                 unsafe {
                     c.seqn.f_seqn = c.seqn.f_seqn.wrapping_add(1);
@@ -641,7 +641,7 @@ pub fn setup_delayed_proxy<F1, F2>(
                                     if old_s_state < TcpState::Established {
                                         // in case the server connection is still not established
                                         // proxy must close connection and sends Fin-Ack to client
-                                        make_reply_packet(&mut hs, 1);
+                                        make_reply_packet(p, &mut hs, 1);
                                         hs.tcp.set_ack_flag();
                                         c.c_seqn = c.c_seqn.wrapping_add(1);
                                         hs.tcp.set_seq_num(c.c_seqn);
