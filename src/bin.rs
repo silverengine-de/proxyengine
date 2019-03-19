@@ -15,7 +15,7 @@ extern crate ipnet;
 extern crate separator;
 
 use e2d2::config::{basic_opts, read_matches};
-use e2d2::interface::{ PortType, PortQueue};
+use e2d2::interface::{ PortType, PmdPort};
 use e2d2::native::zcsi::*;
 use e2d2::scheduler::{initialize_system, NetBricksContext, StandaloneScheduler};
 use e2d2::allocators::CacheAligned;
@@ -208,11 +208,11 @@ pub fn main() {
             let mtx_clone = mtx.clone();
 
             if *configuration.engine.mode.as_ref().unwrap_or(&ProxyMode::Delayed) == ProxyMode::Delayed {
-                context.add_pipeline_to_run(Box::new(
-                    move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
+                context.add_pipeline_to_run_tx_buffered(Box::new(
+                    move |core: i32, pmd_ports: HashMap<String, Arc<PmdPort>>, s: &mut StandaloneScheduler| {
                         setup_pipes_delayed_proxy(
                             core,
-                            p,
+                            pmd_ports,
                             s,
                             &configuration_clone.engine,
                             l234data.clone(),

@@ -37,7 +37,7 @@ use e2d2::interface::{PortQueue, PmdPort, FlowDirector};
 use netfcts::errors::*;
 use netfcts::io::print_hard_statistics;
 use nftcp::setup_delayed_proxy;
-use netfcts::{is_kni_core, setup_kni, FlowSteeringMode};
+use netfcts::{is_kni_core, setup_kni, new_port_queues_for_core, FlowSteeringMode};
 use netfcts::comm::{MessageFrom, MessageTo, PipelineId};
 use netfcts::system::SystemData;
 use netfcts::tcp_common::{L234Data, UserData};
@@ -208,7 +208,7 @@ impl Container {
 
 pub fn setup_pipes_delayed_proxy<F1, F2>(
     core: i32,
-    ports: HashSet<CacheAligned<PortQueue>>,
+    pmd_ports: HashMap<String, Arc<PmdPort>>,
     sched: &mut StandaloneScheduler,
     engine_config: &EngineConfig,
     servers: Vec<L234Data>,
@@ -221,45 +221,19 @@ pub fn setup_pipes_delayed_proxy<F1, F2>(
     F1: Fn(&mut ProxyConnection) + Sized + Send + Sync + 'static,
     F2: Fn(&mut ProxyConnection, &mut [u8], usize) + Sized + Send + Sync + 'static,
 {
-    let mut kni: Option<&CacheAligned<PortQueue>> = None;
-    let mut pci: Option<&CacheAligned<PortQueue>> = None;
-    for port in &ports {
-        debug!(
-            "setup_pipeline on core {}: port {} --  {} rxq {} txq {}",
-            core,
-            port.port,
-            port.port.mac_address(),
-            port.rxq(),
-            port.txq(),
-        );
-        if port.port.is_kni() {
-            kni = Some(port);
-        } else {
-            pci = Some(port);
-        }
-    }
-
-    if pci.is_none() {
-        panic!("need at least one pci port");
-    }
-
-    // kni receive queue is served on the first core (i.e. rxq==0)
-
-    if kni.is_none() && is_kni_core(pci.unwrap()) {
-        // we need a kni i/f for queue 0
-        panic!("need one kni port for queue 0");
-    }
+    let (pci, kni) = new_port_queues_for_core(core, &pmd_ports);
+    assert_eq!(pci.port_queue.port_id(), kni.port_id());
 
     let uuid = Uuid::new_v4();
     let name = String::from("KniHandleRequest");
 
-    if is_kni_core(pci.unwrap()) {
+    if pci.port_queue.rxq() == 0 {
         sched.add_runnable(
             Runnable::from_task(
                 uuid,
                 name,
                 KniHandleRequest {
-                    kni_port: kni.unwrap().port.clone(),
+                    kni_port: kni.port.clone(),
                     last_tick: 0,
                 },
             )
@@ -269,8 +243,8 @@ pub fn setup_pipes_delayed_proxy<F1, F2>(
 
     setup_delayed_proxy(
         core,
-        pci.unwrap(),
-        kni.unwrap(),
+        &pci,
+        &kni,
         sched,
         engine_config,
         servers,

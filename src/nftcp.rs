@@ -52,7 +52,7 @@ const TIMER_WHEEL_SLOT_CAPACITY: usize = 2500;
 
 pub fn setup_delayed_proxy<F1, F2>(
     core: i32,
-    pci: &CacheAligned<PortQueue>,
+    pci: &CacheAligned<PortQueueTxBuffered>,
     kni: &CacheAligned<PortQueue>,
     sched: &mut StandaloneScheduler,
     engine_config: &EngineConfig,
@@ -66,7 +66,7 @@ pub fn setup_delayed_proxy<F1, F2>(
     F1: Fn(&mut ProxyConnection) + Sized + Send + Sync + 'static,
     F2: Fn(&mut ProxyConnection, &mut [u8], usize) + Sized + Send + Sync + 'static,
 {
-    let l4flow_for_this_core = flowdirector_map.get(&pci.port.port_id()).unwrap().get_flow(pci.rxq());
+    let l4flow_for_this_core = flowdirector_map.get(&pci.port_queue.port_id()).unwrap().get_flow(pci.port_queue.rxq());
 
     #[derive(Clone)]
     struct Me {
@@ -83,12 +83,12 @@ pub fn setup_delayed_proxy<F1, F2>(
 
     let pipeline_id = PipelineId {
         core: core as u16,
-        port_id: pci.port.port_id() as u16,
-        rxq: pci.rxq(),
+        port_id: pci.port_queue.port_id() as u16,
+        rxq: pci.port_queue.rxq(),
     };
     debug!("enter setup_forwarder {}", pipeline_id);
     let detailed_records = engine_config.detailed_records.unwrap_or(false);
-    let mut cm: ConnectionManager = ConnectionManager::new(pci.clone(), *l4flow_for_this_core, detailed_records);
+    let mut cm: ConnectionManager = ConnectionManager::new(pci.port_queue.clone(), *l4flow_for_this_core, detailed_records);
 
     let mut timeouts = Timeouts::default_or_some(&engine_config.timeouts);
     let mut wheel = TimerWheel::new(
@@ -119,7 +119,7 @@ pub fn setup_delayed_proxy<F1, F2>(
     tx.send(MessageFrom::Channel(pipeline_id.clone(), remote_tx)).unwrap();
 
     // forwarding frames coming from KNI to PCI, if we are the kni core
-    if is_kni_core(pci) {
+    if pci.port_queue.rxq() == 0 {
         let forward2pci = ReceiveBatch::new(kni.clone()).parse::<MacHeader>().send(pci.clone());
         let uuid = Uuid::new_v4();
         let name = String::from("Kni2Pci");
@@ -153,7 +153,7 @@ pub fn setup_delayed_proxy<F1, F2>(
     }
 
     let mut packet_allocator = PacketAllocator::new();
-    let thread_id = format!("<c{}, rx{}>: ", core, pci.rxq());
+    let thread_id = format!("<c{}, rx{}>: ", core, pci.port_queue.rxq());
     let tcp_min_port = cm.tcp_port_base();
     let me_clone = me.clone();
     let tx_clone = tx.clone();
@@ -187,7 +187,7 @@ pub fn setup_delayed_proxy<F1, F2>(
     // group 0 -> dump packets
     // group 1 -> send to PCI
     // group 2 -> send to KNI
-    let csum_offload = pci.port.csum_offload();
+    let csum_offload = pci.port_queue.port.csum_offload();
     let uuid_l4groupby = Uuid::new_v4();
 
     #[cfg(feature = "profiling")]

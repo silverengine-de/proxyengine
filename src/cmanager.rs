@@ -460,7 +460,7 @@ pub struct ConnectionManager {
     //sock2port: HashMap<(u32, u16), u16>,
     free_ports: VecDeque<u16>,
     port2con: Vec<ProxyConnection>,
-    pci: CacheAligned<PortQueue>,
+    pci: PortQueue,
     // the PortQueue for which connections are managed
     tcp_port_base: u16,
     ip: u32,
@@ -471,7 +471,7 @@ pub struct ConnectionManager {
 const MAX_RECORDS: usize = 0x3FFFF as usize;
 
 impl ConnectionManager {
-    pub fn new(pci: CacheAligned<PortQueue>, l4flow: L4Flow, detailed_records: bool) -> ConnectionManager {
+    pub fn new(pci: PortQueue, l4flow: L4Flow, detailed_records: bool) -> ConnectionManager {
         let old_manager_count: u16 = GLOBAL_MANAGER_COUNT.fetch_add(1, Ordering::SeqCst) as u16;
         let (ip, tcp_port_base) = (l4flow.ip, l4flow.port);
         let port_mask = pci.port.get_tcp_dst_port_mask();
