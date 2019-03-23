@@ -237,7 +237,7 @@ pub fn setup_pipes_delayed_proxy<F1, F2>(
                     last_tick: 0,
                 },
             )
-                .move_ready(), // this task must be ready from the beginning to enable managing the KNI i/f
+            .move_ready(), // this task must be ready from the beginning to enable managing the KNI i/f
         );
     }
 
@@ -391,25 +391,25 @@ pub fn spawn_recv_thread(
                 .as_ref()
                 .unwrap()
                 .recv_timeout(Duration::from_millis(10))
-                {
-                    Ok(SchedulerReply::PerformanceData(core, map)) => {
-                        for d in map {
-                            info!(
-                                "{:2}: {:20} {:>15} count= {:12}, queue length= {}",
-                                core,
-                                (d.1).0,
-                                (d.1).1.separated_string(),
-                                (d.1).2.separated_string(),
-                                (d.1).3
-                            )
-                        }
-                    }
-                    Err(RecvTimeoutError::Timeout) => {}
-                    Err(e) => {
-                        error!("error receiving from SchedulerReply channel: {}", e);
-                        break;
+            {
+                Ok(SchedulerReply::PerformanceData(core, map)) => {
+                    for d in map {
+                        info!(
+                            "{:2}: {:20} {:>15} count= {:12}, queue length= {}",
+                            core,
+                            (d.1).0,
+                            (d.1).1.separated_string(),
+                            (d.1).2.separated_string(),
+                            (d.1).3
+                        )
                     }
                 }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(e) => {
+                    error!("error receiving from SchedulerReply channel: {}", e);
+                    break;
+                }
+            }
         }
         info!("exiting recv thread ...");
     });

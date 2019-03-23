@@ -79,12 +79,11 @@ impl Extension {
         }
     }
 
-
     #[inline]
     pub fn get_last_stamp(&self) -> Option<u64> {
         match self.s_state_count {
             0 => None,
-            _ => Some(self.s_stamps[self.s_state_count as usize - 1] as u64 * TIME_STAMP_REDUCTION_FACTOR)
+            _ => Some(self.s_stamps[self.s_state_count as usize - 1] as u64 * TIME_STAMP_REDUCTION_FACTOR),
         }
     }
 
@@ -119,13 +118,16 @@ impl Storable for Extension {
 
 impl fmt::Display for Extension {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "({:?}, {:?}, {:?})",
-               self.states(),
-               self.release_cause(),
-               self.deltas_to_base_stamp()
-                   .iter()
-                   .map(|u| u.separated_string())
-                   .collect::<Vec<_>>(), )
+        write!(
+            f,
+            "({:?}, {:?}, {:?})",
+            self.states(),
+            self.release_cause(),
+            self.deltas_to_base_stamp()
+                .iter()
+                .map(|u| u.separated_string())
+                .collect::<Vec<_>>(),
+        )
     }
 }
 
@@ -222,7 +224,6 @@ impl ProxyConnection {
         self.detailed_c.as_mut().unwrap().initialize(client_sock, proxy_port)
     }
 
-
     #[inline]
     pub fn port(&self) -> u16 {
         self.proxy_port
@@ -254,7 +255,11 @@ impl ProxyConnection {
     #[inline]
     pub fn sock(&self) -> Option<(u32, u16)> {
         let s = (self.client_ip, self.client_port);
-        if s.0 != 0 { Some(s) } else { None }
+        if s.0 != 0 {
+            Some(s)
+        } else {
+            None
+        }
     }
 
     #[inline]
@@ -310,7 +315,6 @@ impl ProxyConnection {
         }
     }
 
-
     #[inline]
     pub fn s_states(&self) -> Vec<TcpState> {
         if self.detailed_c.is_some() {
@@ -330,7 +334,6 @@ impl ProxyConnection {
     }
 }
 
-
 pub struct DetailedConnection {
     //Box makes the trait object sizeable
     //can be used by applications to store application specific connection state
@@ -341,15 +344,13 @@ pub struct DetailedConnection {
 
 const ERR_NO_CON_RECORD: &str = "connection has no ConRecord";
 
-
 impl DetailedConnection {
     #[inline]
     fn initialize(&mut self, client_sock: &(u32, u16), proxy_sport: u16) {
-        self.store().borrow_mut().get_mut(self.con_rec()).init(
-            TcpRole::Client,
-            proxy_sport,
-            Some(*client_sock),
-        );
+        self.store()
+            .borrow_mut()
+            .get_mut(self.con_rec())
+            .init(TcpRole::Client, proxy_sport, Some(*client_sock));
         // the server side record is initialized when SYN is sent to server
     }
 
@@ -363,8 +364,8 @@ impl DetailedConnection {
 
     fn re_new(&mut self, store: &Rc<RefCell<ProxyRecStore>>) {
         let con_rec = store.borrow_mut().get_next_slot();
-        self.con_rec= Some(con_rec);
-        self.store= Some(Rc::clone(store));
+        self.con_rec = Some(con_rec);
+        self.store = Some(Rc::clone(store));
     }
 
     #[inline]
@@ -409,10 +410,7 @@ impl DetailedConnection {
 
     #[inline]
     pub fn c_push_state(&mut self, state: TcpState) {
-        self.store()
-            .borrow_mut()
-            .get_mut(self.con_rec())
-            .push_state(state);
+        self.store().borrow_mut().get_mut(self.con_rec()).push_state(state);
     }
 
     #[inline]
@@ -433,7 +431,6 @@ impl DetailedConnection {
     }
 }
 
-
 impl<'a> Clone for ProxyConnection {
     fn clone(&self) -> Self {
         ProxyConnection::new()
@@ -448,13 +445,12 @@ pub trait Connection {
     fn c_push_state(&mut self, state: TcpState);
 }
 
-
 pub static GLOBAL_MANAGER_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
 
 pub struct ConnectionManager {
     record_store: Rc<RefCell<ProxyRecStore>>,
-//    sock2port: Sock2Index,
-    sock2port: BTreeMap<(u32,u16), u16>,
+    //    sock2port: Sock2Index,
+    sock2port: BTreeMap<(u32, u16), u16>,
     #[cfg(feature = "profiling")]
     time_adder: TimeAdder,
     //sock2port: HashMap<(u32, u16), u16>,
@@ -480,7 +476,7 @@ impl ConnectionManager {
         let store = Rc::new(RefCell::new(Store64::with_capacity(MAX_RECORDS)));
         let mut cm = ConnectionManager {
             record_store: store.clone(),
-//            sock2port: Sock2Index::new(),
+            //            sock2port: Sock2Index::new(),
             sock2port: BTreeMap::new(),
             #[cfg(feature = "profiling")]
             time_adder: TimeAdder::new_with_warm_up("connection initialize", 100000, 100),
@@ -530,7 +526,6 @@ impl ConnectionManager {
         self.ip
     }
 
-
     #[inline]
     pub fn get_mut_by_port(&mut self, port: u16) -> Option<&mut ProxyConnection> {
         if self.owns_tcp_port(port) {
@@ -573,7 +568,7 @@ impl ConnectionManager {
             assert!(!cc.in_use());
 
             #[cfg(feature = "profiling")]
-                let timestamp_entry = utils::rdtscp_unsafe();
+            let timestamp_entry = utils::rdtscp_unsafe();
 
             if self.detailed_records {
                 cc.initialize_with_details(sock, port, &self.record_store);
@@ -582,7 +577,7 @@ impl ConnectionManager {
             }
 
             #[cfg(feature = "profiling")]
-                self.time_adder.add_diff(utils::rdtscp_unsafe() - timestamp_entry);
+            self.time_adder.add_diff(utils::rdtscp_unsafe() - timestamp_entry);
 
             debug!(
                 "rxq={}: tcp flow for socket ({},{}) created on {}:{:?}",
@@ -661,7 +656,12 @@ impl ConnectionManager {
                 let c = c.unwrap();
                 c.set_release_cause(ReleaseCause::Timeout);
                 c.c_push_state(TcpState::Closed);
-                warn!("timing out port {}, sock {:?} at {:?}", port, c.sock().unwrap_or((0,0)), c.wheel_slot_and_index);
+                warn!(
+                    "timing out port {}, sock {:?} at {:?}",
+                    port,
+                    c.sock().unwrap_or((0, 0)),
+                    c.wheel_slot_and_index
+                );
                 sock = c.sock();
                 c.release();
                 release = true;
@@ -674,7 +674,6 @@ impl ConnectionManager {
             }
         }
     }
-
 
     pub fn fetch_c_records(&mut self) -> Option<ProxyRecStore> {
         // we are "moving" the record_store out, and replace it with a new one

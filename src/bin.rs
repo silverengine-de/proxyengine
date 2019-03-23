@@ -150,20 +150,20 @@ pub fn main() {
                 break;
             }
         }
-/*
-        if let Some(_) = c.userdata {
-            c.userdata.as_mut().unwrap().init();
-        } else {
-            c.userdata = Some(Container::new());
-        }
-*/
+        /*
+                if let Some(_) = c.userdata {
+                    c.userdata.as_mut().unwrap().init();
+                } else {
+                    c.userdata = Some(Container::new());
+                }
+        */
     };
 
-    let no_servers= l234data.len();
+    let no_servers = l234data.len();
     let mut last_server: u8 = 0;
     let _f_round_robbin = move |c: &mut ProxyConnection| {
-        if (last_server as usize) < no_servers-1 {
-            last_server +=1;
+        if (last_server as usize) < no_servers - 1 {
+            last_server += 1;
         } else {
             last_server = 0;
         }
@@ -179,7 +179,12 @@ pub fn main() {
                 debug!("Supported filters on port {}:", port.port_id());
                 for i in RteFilterType::RteEthFilterNone as i32 + 1..RteFilterType::RteEthFilterMax as i32 {
                     let result = unsafe { rte_eth_dev_filter_supported(port.port_id() as u16, RteFilterType::from(i)) };
-                    debug!("{:<50}: {}(rc={})", RteFilterType::from(i), if result== 0 { "supported" } else {"not supported"}, result);
+                    debug!(
+                        "{:<50}: {}(rc={})",
+                        RteFilterType::from(i),
+                        if result == 0 { "supported" } else { "not supported" },
+                        result
+                    );
                 }
             }
         }
@@ -224,7 +229,8 @@ pub fn main() {
                         );
                     },
                 ));
-            } else { // simple proxy
+            } else {
+                // simple proxy
                 error!("simple proxy still not implemented");
             }
 
@@ -250,9 +256,12 @@ pub fn main() {
             println!("press ctrl-c to terminate proxy ...");
             let mut loops: usize = 300;
             while running.load(Ordering::SeqCst) {
-                if loops == 300 { loops= 0; info!("available mbufs in memory pool= {:6}", unsafe { mbuf_avail_count()} ); }
+                if loops == 300 {
+                    loops = 0;
+                    info!("available mbufs in memory pool= {:6}", unsafe { mbuf_avail_count() });
+                }
                 thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
-                loops+= 1;
+                loops += 1;
             }
 
             println!("\nTask Performance Data:\n");
@@ -260,7 +269,9 @@ pub fn main() {
             thread::sleep(Duration::from_millis(1000 as u64));
 
             mtx.send(MessageFrom::FetchCounter).unwrap();
-            if configuration.engine.detailed_records.unwrap_or(false) { mtx.send(MessageFrom::FetchCRecords).unwrap(); }
+            if configuration.engine.detailed_records.unwrap_or(false) {
+                mtx.send(MessageFrom::FetchCRecords).unwrap();
+            }
 
             let mut tcp_counters_c = HashMap::new();
             let mut tcp_counters_s = HashMap::new();
@@ -295,14 +306,16 @@ pub fn main() {
                 let mut completed_count_s = 0;
                 for (_p, con_recs) in &con_records {
                     for c in con_recs.iter_0() {
-                        if (c.release_cause() == ReleaseCause::PassiveClose || c.release_cause() == ReleaseCause::ActiveClose)
+                        if (c.release_cause() == ReleaseCause::PassiveClose
+                            || c.release_cause() == ReleaseCause::ActiveClose)
                             && c.last_state() == TcpState::Closed
                         {
                             completed_count_c += 1
                         };
                     }
                     for c in con_recs.iter_1() {
-                        if (c.release_cause() == ReleaseCause::PassiveClose || c.release_cause() == ReleaseCause::ActiveClose)
+                        if (c.release_cause() == ReleaseCause::PassiveClose
+                            || c.release_cause() == ReleaseCause::ActiveClose)
                             && c.last_state() == TcpState::Closed
                         {
                             completed_count_s += 1
@@ -348,7 +361,10 @@ pub fn main() {
                             if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
                                 max = c.clone()
                             }
-                            if i == (c_records.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some() {
+                            if i == (c_records.len() - 1)
+                                && min.get_first_stamp().is_some()
+                                && max.get_last_stamp().is_some()
+                            {
                                 let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
                                 info!(
                                     "total used cycles= {}, per connection = {}",

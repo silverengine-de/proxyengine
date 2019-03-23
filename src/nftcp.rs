@@ -66,7 +66,10 @@ pub fn setup_delayed_proxy<F1, F2>(
     F1: Fn(&mut ProxyConnection) + Sized + Send + Sync + 'static,
     F2: Fn(&mut ProxyConnection, &mut [u8], usize) + Sized + Send + Sync + 'static,
 {
-    let l4flow_for_this_core = flowdirector_map.get(&pci.port_queue.port_id()).unwrap().get_flow(pci.port_queue.rxq());
+    let l4flow_for_this_core = flowdirector_map
+        .get(&pci.port_queue.port_id())
+        .unwrap()
+        .get_flow(pci.port_queue.rxq());
 
     #[derive(Clone)]
     struct Me {
@@ -127,28 +130,31 @@ pub fn setup_delayed_proxy<F1, F2>(
     }
 
     struct PacketAllocator {
-        packet_batch: Option<Vec<Packet<NullHeader, EmptyMetadata>>>
+        packet_batch: Option<Vec<Packet<NullHeader, EmptyMetadata>>>,
     }
 
     impl PacketAllocator {
         fn new() -> PacketAllocator {
             PacketAllocator {
-                packet_batch: new_packet_array(&mut [ptr::null_mut::<MBuf>(); 32] )
+                packet_batch: new_packet_array(&mut [ptr::null_mut::<MBuf>(); 32]),
             }
         }
 
         fn get_packet(&mut self) -> Option<Packet<NullHeader, EmptyMetadata>> {
-            if self.packet_batch.is_some()  {
+            if self.packet_batch.is_some() {
                 if self.packet_batch.as_ref().unwrap().is_empty() {
                     self.packet_batch = new_packet_array(&mut [ptr::null_mut::<MBuf>(); 32]);
                     if self.packet_batch.is_some() {
                         self.packet_batch.as_mut().unwrap().pop()
-                    } else { None }
+                    } else {
+                        None
+                    }
                 } else {
                     self.packet_batch.as_mut().unwrap().pop()
                 }
+            } else {
+                None
             }
-            else { None }
         }
     }
 
@@ -162,7 +168,7 @@ pub fn setup_delayed_proxy<F1, F2>(
     let mut counter_c = TcpCounter::new();
     let mut counter_s = TcpCounter::new();
     #[cfg(feature = "profiling")]
-        let mut rx_tx_stats = Vec::with_capacity(10000);
+    let mut rx_tx_stats = Vec::with_capacity(10000);
 
     // set up the generator producing timer tick packets with our private EtherType
     let (producer_timerticks, consumer_timerticks) = new_mpsc_queue_pair();
@@ -176,7 +182,7 @@ pub fn setup_delayed_proxy<F1, F2>(
         uuid_tick_generator,
         TaskType::TickGenerator,
     ))
-        .unwrap();
+    .unwrap();
 
     let receive_pci = ReceiveBatch::new(pci.clone());
     let l2_input_stream = merge_auto(
@@ -191,31 +197,31 @@ pub fn setup_delayed_proxy<F1, F2>(
     let uuid_l4groupby = Uuid::new_v4();
 
     #[cfg(feature = "profiling")]
-        let tx_stats = pci.tx_stats();
+    let tx_stats = pci.tx_stats();
     #[cfg(feature = "profiling")]
-        let rx_stats = pci.rx_stats();
+    let rx_stats = pci.rx_stats();
 
     #[cfg(feature = "profiling")]
-        let mut time_adders;
+    let mut time_adders;
     #[cfg(feature = "profiling")]
-        {
-            let sample_size = 100000 as u64;
-            let warm_up = 100 as u64;
-            time_adders = [
-                TimeAdder::new_with_warm_up("c_cmanager_syn", sample_size, warm_up),
-                TimeAdder::new_with_warm_up("s_cmanager", sample_size * 2, warm_up),
-                TimeAdder::new_with_warm_up("c_recv_syn", sample_size, warm_up),
-                TimeAdder::new_with_warm_up("s_recv_syn_ack", sample_size, warm_up),
-                TimeAdder::new_with_warm_up("c_recv_syn_ack2", sample_size, warm_up),
-                TimeAdder::new_with_warm_up("c_recv_1_payload", sample_size, warm_up),
-                TimeAdder::new_with_warm_up("c2s_stable", sample_size, warm_up),
-                TimeAdder::new_with_warm_up("s2c_stable", sample_size, warm_up),
-                TimeAdder::new_with_warm_up("c_cmanager_not_syn", sample_size * 2, warm_up),
-                TimeAdder::new_with_warm_up("", sample_size, warm_up),
-                TimeAdder::new_with_warm_up("", sample_size, warm_up),
-                TimeAdder::new_with_warm_up("", sample_size, warm_up),
-            ];
-        }
+    {
+        let sample_size = 100000 as u64;
+        let warm_up = 100 as u64;
+        time_adders = [
+            TimeAdder::new_with_warm_up("c_cmanager_syn", sample_size, warm_up),
+            TimeAdder::new_with_warm_up("s_cmanager", sample_size * 2, warm_up),
+            TimeAdder::new_with_warm_up("c_recv_syn", sample_size, warm_up),
+            TimeAdder::new_with_warm_up("s_recv_syn_ack", sample_size, warm_up),
+            TimeAdder::new_with_warm_up("c_recv_syn_ack2", sample_size, warm_up),
+            TimeAdder::new_with_warm_up("c_recv_1_payload", sample_size, warm_up),
+            TimeAdder::new_with_warm_up("c2s_stable", sample_size, warm_up),
+            TimeAdder::new_with_warm_up("s2c_stable", sample_size, warm_up),
+            TimeAdder::new_with_warm_up("c_cmanager_not_syn", sample_size * 2, warm_up),
+            TimeAdder::new_with_warm_up("", sample_size, warm_up),
+            TimeAdder::new_with_warm_up("", sample_size, warm_up),
+            TimeAdder::new_with_warm_up("", sample_size, warm_up),
+        ];
+    }
 
     let delayed_binding_closure =
         // this is the main closure containing the proxy service logic
@@ -869,10 +875,13 @@ pub fn setup_delayed_proxy<F1, F2>(
             group_index
         };
 
-    let mut l4groups =
-        l2_input_stream
-            .parse::<MacHeader>()
-            .group_by(3, delayed_binding_closure, sched, "L4-Groups".to_string(), uuid_l4groupby);
+    let mut l4groups = l2_input_stream.parse::<MacHeader>().group_by(
+        3,
+        delayed_binding_closure,
+        sched,
+        "L4-Groups".to_string(),
+        uuid_l4groupby,
+    );
 
     let pipe2kni = l4groups.get_group(2).unwrap().send(kni.clone());
     let l4pciflow = l4groups.get_group(1).unwrap().compose();

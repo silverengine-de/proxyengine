@@ -3,13 +3,14 @@
 ProxyEngine is a user-space TCP-proxy written in Rust with following properties
 * TCP pass-through
 * customizable delayed binding
-* high performance: multi-core, shared nothing, locking-free architecture
+* high performance: almost **1 million TCP connections opened and closed per second using 3 cores**
+* multi-core, shared nothing, locking-free architecture
 * client side receive side scaling (RSS), server side receive flow steering (RFS) by NIC
 * customizable payload inspection and manipulation
 
 It may be used for intelligent load-balancing and fire-walling of TCP based protocols, e.g. LDAP. Late binding allows to select the target server not till the first payload packet after the initial three-way hand-shake is received. In addition callbacks can be defined by which the proxy can modify the payload of the TCP based protocol. For this purpose additional connection state is maintained by the ProxyEngine.
 
-First benchmarking shows that ProxyEngine can handle about 200,000 connections per second (cps) per core. Each connection exchanges seven packets between client and server.
+First benchmarking shows that ProxyEngine can handle more than 300,000 connections per second (cps) per core. Each connection exchanges seven packets between client and server.
 
 Scaling happens by distributing incoming client-side TCP connections using RSS over the cores and by steering the incoming server side TCP connections to the appropriate core. This receive flow steering can be either based on the port or on the IP address of the server side connection (selected by parameter _flow_steering_ in the toml configuration file). In the first case port resources of the proxy are assigned to cores (based on paramater _dst_port_mask_ in the configuration file). In the second case each core uses a unique IP address for the server side connections.     
 
@@ -65,15 +66,19 @@ Latest code of ProxyEngine was tested on two different 2-socket NUMA servers, ea
 
 #### CPS Performance Test
 
-A recent performance test using [TrafficEngine](https://github.com/rstade/TrafficEngine) as traffic generator on a second server achieves ~230,000 connections per second (cps) 
-on a single core of a six-core E5-2640 with 2.50 GHz. Each connection comprises three packets each for connection setup and release and one additional payload packet (seven packets in total). 
-In this test we have therefore a high cps but a rather low number of packets per connection. In consequence this test stresses the processor cache and performance is determined by the cache coherence which can be achieved. 
-Therefore adding cores does not necessarily increase linearly the cps performance. Thus with a second core we 'only' achieve ~320,000 cps.
+A recent performance test using [TrafficEngine](https://github.com/rstade/TrafficEngine) as traffic generator on a second server gives the result shown in the following figure.
 
-Tests were run on a two socket server with two 6 core E5-2640 @ 2.5GHz each with 32K/256K/15M L1/L2/L3 Cache and a recent Centos 7.5 real-time kernel,
- e.g. from repository: http://linuxsoft.cern.ch/cern/centos/7/rt/CentOS-RT.repo. 
- We also performed the basic tuning steps to isolate the cores which are running our working threads. 
- The real-time kernel increases determinism significantly versus the usual Centos non-real-time kernel. For more information see [rt-tuning.md](https://github.com/rstade/TrafficEngine/blob/master/rt-tuning.md).
+![ProxyEngine performance](https://github.com/silverengine-de/proxyengine/blob/master/cps_vs_cores_proxy.png)
 
-A test with a more realistic traffic mix is currently planned.
+For this test we run ProxyEngine on one to three cores of a six-core E5-2640 (32K/256K/15M L1/L2/L3 Cache) in socket 0 of a DL380p Gen8 server with 2.50 GHz and a Centos 7.5 real-time kernel. As NIC we used X710-DA2. Each connection comprises three packets each for opening and closing the connection and one short additional payload packet (seven packets in total).  We also performed the basic tuning steps to isolate the cores which are running our working threads.  The real-time kernel increases determinism significantly versus the usual Centos non-real-time kernel. For more information see [rt-tuning.md](https://github.com/rstade/TrafficEngine/blob/master/rt-tuning.md). The TCP traffic generator [TrafficEngine](https://github.com/rstade/TrafficEngine) was run on 5 cores of a DL160-Gen6 server interconnected via another 10G NIC (82599 based) to the server running ProxyEngine.
+
+More tests with larger payload per tcp connection are planned. 
+
+
+* Note 1: The tests were run with network configuration created by prepNet.uio.sh. The vfio-pci driver (prepNet.2.sh) failed when the X710-DA2 NIC was placed in a x8 PCI-slot of DL380, even after applying the [HP RMRR patch](https://support.hpe.com/hpsc/doc/public/display?docId=emr_na-c04781229&sp4ts.oid=5249566). Without patch it failed with dmesg error "Device is ineligible for IOMMU domain attach due to platform RMRR requirement", with patch it failed even worse with a hard PCI bus error.
+
+* Note 2: When the NIC is placed in the x4 PCI slot (slot 3) of DL380p Gen8 on first signs it appears to work, however obviously only one TX queue is active: the performance does not increase significantyl when more than one core is used as the tx-queues start to overflow, while rx queues are empty.
+
+
+
 
