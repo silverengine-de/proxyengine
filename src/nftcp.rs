@@ -42,8 +42,6 @@ use {PipelineId, MessageFrom, MessageTo, TaskType};
 use Timeouts;
 use ProxyRecStore;
 
-use is_kni_core;
-
 const MIN_FRAME_SIZE: usize = 60; // without fcs
 
 const TIMER_WHEEL_RESOLUTION_MS: u64 = 10;

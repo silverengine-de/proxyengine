@@ -18,7 +18,6 @@ use std::io::{Read, BufWriter, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc::channel;
 use std::sync::mpsc::RecvTimeoutError;
-use std::collections::{HashSet};
 use std::fs::File;
 use std::str::FromStr;
 use std::collections::HashMap;
@@ -34,7 +33,6 @@ use e2d2::native::zcsi::*;
 use e2d2::interface::PmdPort;
 use e2d2::scheduler::initialize_system;
 use e2d2::scheduler::StandaloneScheduler;
-use e2d2::allocators::CacheAligned;
 
 use netfcts::initialize_flowdirector;
 use netfcts::tcp_common::{ReleaseCause, TcpStatistics, L234Data, TcpState};

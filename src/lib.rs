@@ -31,13 +31,12 @@ use separator::Separatable;
 
 use e2d2::common::ErrorKind as E2d2ErrorKind;
 use e2d2::scheduler::*;
-use e2d2::allocators::CacheAligned;
-use e2d2::interface::{PortQueue, PmdPort, FlowDirector};
+use e2d2::interface::{PmdPort, FlowDirector};
 
 use netfcts::errors::*;
 use netfcts::io::print_hard_statistics;
 use nftcp::setup_delayed_proxy;
-use netfcts::{is_kni_core, setup_kni, new_port_queues_for_core, FlowSteeringMode};
+use netfcts::{setup_kni, new_port_queues_for_core, FlowSteeringMode};
 use netfcts::comm::{MessageFrom, MessageTo, PipelineId};
 use netfcts::system::SystemData;
 use netfcts::tcp_common::{L234Data, UserData};
@@ -46,7 +45,7 @@ use std::fs::File;
 use std::io::Read;
 use std::any::Any;
 use std::net::Ipv4Addr;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, };
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::sync::mpsc::Receiver;

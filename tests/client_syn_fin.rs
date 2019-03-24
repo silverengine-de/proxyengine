@@ -19,7 +19,7 @@ use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::mpsc::channel;
 use std::fs::File;
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap};
 use std::str::FromStr;
 use std::sync::mpsc::RecvTimeoutError;
 

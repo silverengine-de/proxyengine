@@ -18,9 +18,8 @@ use e2d2::config::{basic_opts, read_matches};
 use e2d2::interface::{ PortType, PmdPort};
 use e2d2::native::zcsi::*;
 use e2d2::scheduler::{initialize_system, NetBricksContext, StandaloneScheduler};
-use e2d2::allocators::CacheAligned;
 
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap};
 use std::env;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -7,7 +7,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use e2d2::headers::TcpHeader;
-use e2d2::allocators::CacheAligned;
 use e2d2::interface::{PortQueue, L4Flow, Packet};
 use e2d2::common::EmptyMetadata;
 use e2d2::utils;
