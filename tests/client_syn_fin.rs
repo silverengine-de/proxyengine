@@ -125,7 +125,7 @@ fn delayed_binding_proxy() {
     let l234data_clone = l234data.clone();
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_select_server = move |c: &mut ProxyConnection| {
-        let s = String::from_utf8(c.payload_packet.as_ref().unwrap().get_payload().to_vec()).unwrap();
+        let s = String::from_utf8(c.payload_packet.as_ref().unwrap().get_payload(2).to_vec()).unwrap();
         // read first item in string and convert to usize:
         let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
         let remainder = stars % l234data_clone.len();

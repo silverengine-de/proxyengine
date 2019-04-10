@@ -1,14 +1,12 @@
 use std::net::Ipv4Addr;
 use std::collections::{VecDeque, BTreeMap};
-use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::fmt;
 use std::mem;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use e2d2::headers::TcpHeader;
-use e2d2::interface::{PortQueue, L4Flow, Packet};
-use e2d2::common::EmptyMetadata;
+use e2d2::interface::{PortQueue, L4Flow, Pdu};
 use e2d2::utils;
 
 //use uuid::Uuid;
@@ -30,8 +28,8 @@ pub type ProxyRecStore = Store64<Extension>;
 #[derive(Clone, Copy, Debug)]
 #[repr(align(32))]
 pub struct Extension {
-    s_stamps: [u32; 5],
-    s_state: [u8; 8],
+    s_stamps: [u32; 7],
+    s_state: [u8; 7],
     s_state_count: u8,
     s_release_cause: u8,
 }
@@ -107,8 +105,8 @@ impl Extension {
 impl Storable for Extension {
     fn new() -> Extension {
         Extension {
-            s_state: [TcpState::Listen as u8; 8],
-            s_stamps: [0u32; 5],
+            s_state: [TcpState::Listen as u8; 7],
+            s_stamps: [0u32; 7],
             s_release_cause: ReleaseCause::Unknown as u8,
             s_state_count: 0,
         }
@@ -137,8 +135,8 @@ pub union Seqn {
     pub seqn_fin_p2c: u32,
 }
 
-pub struct ProxyConnection {
-    pub payload_packet: Option<Box<Packet<TcpHeader, EmptyMetadata>>>,
+pub struct ProxyConnection<'a> {
+    pub payload_packet: Option<Box<Pdu<'a>>>,
     //pub payload: Box<Vec<u8>>,
     detailed_c: Option<Box<DetailedConnection>>,
     pub client_mac: MacAddress,
@@ -167,8 +165,8 @@ pub struct ProxyConnection {
     server_index: u8,
 }
 
-impl ProxyConnection {
-    fn new() -> ProxyConnection {
+impl<'a> ProxyConnection<'a> {
+    fn new() -> ProxyConnection<'a> {
         ProxyConnection {
             payload_packet: None,
             //payload: Box::new(Vec::with_capacity(1500)),
@@ -430,7 +428,7 @@ impl DetailedConnection {
     }
 }
 
-impl<'a> Clone for ProxyConnection {
+impl<'a> Clone for ProxyConnection<'a> {
     fn clone(&self) -> Self {
         ProxyConnection::new()
     }
@@ -444,9 +442,9 @@ pub trait Connection {
     fn c_push_state(&mut self, state: TcpState);
 }
 
-pub static GLOBAL_MANAGER_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
+pub static GLOBAL_MANAGER_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-pub struct ConnectionManager {
+pub struct ConnectionManager<'a> {
     record_store: Rc<RefCell<ProxyRecStore>>,
     //    sock2port: Sock2Index,
     sock2port: BTreeMap<(u32, u16), u16>,
@@ -454,7 +452,7 @@ pub struct ConnectionManager {
     time_adder: TimeAdder,
     //sock2port: HashMap<(u32, u16), u16>,
     free_ports: VecDeque<u16>,
-    port2con: Vec<ProxyConnection>,
+    port2con: Vec<ProxyConnection<'a>>,
     pci: PortQueue,
     // the PortQueue for which connections are managed
     tcp_port_base: u16,
@@ -465,8 +463,8 @@ pub struct ConnectionManager {
 
 const MAX_RECORDS: usize = 0x3FFFF as usize;
 
-impl ConnectionManager {
-    pub fn new(pci: PortQueue, l4flow: L4Flow, detailed_records: bool) -> ConnectionManager {
+impl<'a> ConnectionManager<'a> {
+    pub fn new(pci: PortQueue, l4flow: L4Flow, detailed_records: bool) -> ConnectionManager<'a> {
         let old_manager_count: u16 = GLOBAL_MANAGER_COUNT.fetch_add(1, Ordering::SeqCst) as u16;
         let (ip, tcp_port_base) = (l4flow.ip, l4flow.port);
         let port_mask = pci.port.get_tcp_dst_port_mask();
@@ -506,7 +504,7 @@ impl ConnectionManager {
     }
 
     #[inline]
-    fn get_mut_con(&mut self, p: &u16) -> &mut ProxyConnection {
+    fn get_mut_con(&mut self, p: &u16) -> &mut ProxyConnection<'a> {
         &mut self.port2con[(p - self.tcp_port_base) as usize]
     }
 
@@ -526,7 +524,7 @@ impl ConnectionManager {
     }
 
     #[inline]
-    pub fn get_mut_by_port(&mut self, port: u16) -> Option<&mut ProxyConnection> {
+    pub fn get_mut_by_port(&mut self, port: u16) -> Option<&mut ProxyConnection<'a>> {
         if self.owns_tcp_port(port) {
             let c = self.get_mut_con(&port);
             // check if c is in use
@@ -540,7 +538,7 @@ impl ConnectionManager {
         }
     }
 
-    pub fn get_mut_by_sock(&mut self, sock: &(u32, u16)) -> Option<&mut ProxyConnection> {
+    pub fn get_mut_by_sock(&mut self, sock: &(u32, u16)) -> Option<&mut ProxyConnection<'a>> {
         let port = self.sock2port.get(sock);
         if port.is_some() {
             Some(&mut self.port2con[(port.unwrap() - self.tcp_port_base) as usize])
@@ -549,7 +547,7 @@ impl ConnectionManager {
         }
     }
 
-    pub fn get_mut_or_insert(&mut self, sock: &(u32, u16)) -> Option<&mut ProxyConnection> {
+    pub fn get_mut_or_insert(&mut self, sock: &(u32, u16)) -> Option<&mut ProxyConnection<'a>> {
         {
             // we borrow sock2port here !
             let port = self.sock2port.get(sock);

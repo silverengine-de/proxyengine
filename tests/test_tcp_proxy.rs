@@ -127,7 +127,7 @@ fn delayed_binding_proxy() {
     let l234data_clone = l234data.clone();
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_by_payload= move |c: &mut ProxyConnection| {
-        let s = String::from_utf8(c.payload_packet.as_ref().unwrap().get_payload().to_vec()).unwrap();
+        let s = String::from_utf8(c.payload_packet.as_ref().unwrap().get_payload(2).to_vec()).unwrap();
         // read first item in string and convert to usize:
         let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
         let remainder = stars % l234data_clone.len();
@@ -449,11 +449,11 @@ fn delayed_binding_proxy() {
                 );
                 assert_eq!(
                     counters[TcpStatistics::SentSyn],
-                    counters[TcpStatistics::Payload]
+                    counters[TcpStatistics::SentPayload]
                 );
                 assert_eq!(
                     tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvSyn],
-                    tcp_counters_c.get(&p).unwrap()[TcpStatistics::Payload]
+                    tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvPayload]
                 );
             }
 

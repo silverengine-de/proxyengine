@@ -140,7 +140,7 @@ pub fn main() {
     let f_by_payload = move |c: &mut ProxyConnection| {
         //let cdata: CData = serde_json::from_slice(&c.payload).expect("cannot deserialize CData");
         //no_calls +=1;
-        let cdata: CData = bincode::deserialize::<CData>(c.payload_packet.as_ref().unwrap().get_payload())
+        let cdata: CData = bincode::deserialize::<CData>(c.payload_packet.as_ref().unwrap().get_payload(2))
             .expect("cannot deserialize CData");
 
         for (i, l234) in l234data_clone.iter().enumerate() {
@@ -149,13 +149,6 @@ pub fn main() {
                 break;
             }
         }
-        /*
-                if let Some(_) = c.userdata {
-                    c.userdata.as_mut().unwrap().init();
-                } else {
-                    c.userdata = Some(Container::new());
-                }
-        */
     };
 
     let no_servers = l234data.len();
