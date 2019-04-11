@@ -247,9 +247,6 @@ fn delayed_binding_proxy() {
         }
         Err(ref e) => {
             error!("Error: {}", e);
-            if let Some(backtrace) = e.backtrace() {
-                debug!("Backtrace: {:?}", backtrace);
-            }
             std::process::exit(1);
         }
     }

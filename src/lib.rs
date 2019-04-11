@@ -33,7 +33,6 @@ use e2d2::common::ErrorKind as E2d2ErrorKind;
 use e2d2::scheduler::*;
 use e2d2::interface::{PmdPort, FlowDirector};
 
-use netfcts::errors::*;
 use netfcts::io::print_hard_statistics;
 use nftcp::setup_delayed_proxy;
 use netfcts::{setup_kni, new_port_queues_for_core, FlowSteeringMode};
@@ -135,11 +134,12 @@ impl Timeouts {
     }
 }
 
-pub fn read_config(filename: &str) -> Result<Configuration> {
+pub fn read_config(filename: &str) -> e2d2::common::Result<Configuration> {
     let mut toml_str = String::new();
-    let _ = File::open(filename)
-        .and_then(|mut f| f.read_to_string(&mut toml_str))
-        .chain_err(|| E2d2ErrorKind::ConfigurationError(format!("Could not read file {}", filename)))?;
+    if File::open(filename)
+        .and_then(|mut f| f.read_to_string(&mut toml_str)).is_err() {
+        return Err(E2d2ErrorKind::ConfigurationError(format!("Could not read file {}", filename)));
+    }
 
     info!("toml configuration:\n {}", toml_str);
 

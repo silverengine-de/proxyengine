@@ -43,7 +43,6 @@ use netfcts::initialize_flowdirector;
 use netfcts::tcp_common::{ReleaseCause, CData, L234Data, TcpState};
 use netfcts::comm::{MessageFrom, MessageTo};
 use netfcts::system::SystemData;
-use netfcts::errors::*;
 use netfcts::io::{ print_tcp_counters };
 #[cfg(feature = "profiling")]
 use netfcts::io::print_rx_tx_counters;
@@ -165,7 +164,7 @@ pub fn main() {
     // this is the closure, which may modify the payload of client to server packets in a TCP connection
     let f_process_payload_c_s = |_c: &mut ProxyConnection, _payload: &mut [u8], _tailroom: usize| {};
 
-    fn check_system(context: NetBricksContext) -> Result<NetBricksContext> {
+    fn check_system(context: NetBricksContext) -> e2d2::common::Result<NetBricksContext> {
         for port in context.ports.values() {
             if port.port_type() == &PortType::Dpdk {
                 debug!("Supported filters on port {}:", port.port_id());
@@ -377,9 +376,7 @@ pub fn main() {
         }
         Err(ref e) => {
             error!("Error: {}", e);
-            if let Some(backtrace) = e.backtrace() {
-                debug!("Backtrace: {:?}", backtrace);
-            }
+
             std::process::exit(1);
         }
     }
