@@ -442,7 +442,7 @@ pub fn setup_delayed_proxy<F1, F2>(
                 }
             }
 */
-            // attention: after calling select_server, p points to a different mbuf and has different headers
+            /// attention: after calling select_server, p points to a different mbuf and has different headers
             /// selects the server by calling the closure, sends SYN to server
             fn select_server<F>(
                 p: &mut Pdu,
@@ -688,7 +688,7 @@ pub fn setup_delayed_proxy<F1, F2>(
                         }
                 }
                 _ => {
-                    // we use a clone for reading tcp header to avoid immutable borrow
+                    // we use a clone for reading tcp header to avoid immutable borrow. But attention, this clone does not update, when we change the original header!
                     let tcp = pdu.headers().tcp(2).clone();
                     let src_sock = (pdu.headers().ip(1).src(), tcp.src_port());
 
@@ -779,7 +779,8 @@ pub fn setup_delayed_proxy<F1, F2>(
                                         c.s_set_release_cause(ReleaseCause::PassiveClose);
                                         counter_c[TcpStatistics::SentFinPssv] += 1;
                                         counter_c[TcpStatistics::SentAck4Fin] += 1;
-                                        c.seqn.ack_for_fin_p2c = tcp.seq_num().wrapping_add(1);
+                                        // do not use the clone "tcp" here:
+                                        c.seqn.ack_for_fin_p2c = c.c_seqn.wrapping_add(1);
                                         //TODO send restart to server?
                                         trace!("FIN-ACK to client, L3: { }, L4: { }", pdu.headers().ip(1), tcp);
                                     } else {
@@ -795,6 +796,12 @@ pub fn setup_delayed_proxy<F1, F2>(
                                 release_connection = Some(c.port());
                             } else if tcp.ack_flag() && tcp.ack_num() == unsafe { c.seqn.ack_for_fin_p2c } && old_s_state >= TcpState::FinWait1 {
                                 // ACK from client for FIN of Server
+                                trace!(
+                                    "{}  ACK from client, src_port= {}, old_s_state = {:?}",
+                                    thread_id,
+                                    tcp.src_port(),
+                                    old_s_state,
+                                );
                                 match old_s_state {
                                     TcpState::FinWait1 => { c.s_push_state(TcpState::FinWait2); }
                                     TcpState::Closing => { c.s_push_state(TcpState::Closed); }
@@ -845,6 +852,9 @@ pub fn setup_delayed_proxy<F1, F2>(
                                 );
                                 counter_c[TcpStatistics::Unexpected] += 1;
                                 group_index = 2;
+                            }
+                            else {
+                                trace!{"c2s: nothing to do?, tcp= {}, tcp_payload_size={}, expected ackn_for_fin ={}", tcp, tcp_payload_size(pdu), unsafe { c.seqn.ack_for_fin_p2c} };
                             }
 
                             if c.client_state() == TcpState::Closed && c.server_state() == TcpState::Closed {
