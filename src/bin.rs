@@ -141,7 +141,7 @@ pub fn main() {
         //no_calls +=1;
         let cdata: CData = bincode::deserialize::<CData>(c.payload_packet.as_ref().unwrap().get_payload(2))
             .expect("cannot deserialize CData");
-
+        //info!("cdata = {:?}", cdata);
         for (i, l234) in l234data_clone.iter().enumerate() {
             if l234.port == cdata.reply_socket.port() && l234.ip == u32::from(*cdata.reply_socket.ip()) {
                 c.set_server_index(i as u8);
@@ -333,10 +333,11 @@ pub fn main() {
                         let mut min = c_records.iter_0().last().unwrap().clone();
                         let mut max = min.clone();
                         c_records.sort_0_by(|a, b| a.sock().1.cmp(&b.sock().1));
-
-                        c_records.iter_0().enumerate().for_each(|(i, c)| {
-                            let line = format!("{:6}: {}\n", i, c);
-                            f.write_all(line.as_bytes()).expect("cannot write c_records");
+                        c_records.iter().enumerate().for_each(|(i, (c, s))| {
+                            let line_c = format!("{:6}: {}\n", i, c);
+                            f.write_all(line_c.as_bytes()).expect("cannot write c_records for client");
+                            let line_s = format!("        {}\n", s);
+                            f.write_all(line_s.as_bytes()).expect("cannot write c_records for server");
 
                             if (c.release_cause() == ReleaseCause::PassiveClose
                                 || c.release_cause() == ReleaseCause::ActiveClose)
@@ -376,7 +377,6 @@ pub fn main() {
         }
         Err(ref e) => {
             error!("Error: {}", e);
-
             std::process::exit(1);
         }
     }

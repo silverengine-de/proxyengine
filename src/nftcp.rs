@@ -345,6 +345,7 @@ pub fn setup_delayed_proxy<F1, F2>(
                 c: &mut ProxyConnection,
                 me: &Me,
             ) {
+                let newseqn;
                 {
                     // this is the s->c part of the stable two-way connection state
                     // translate packets and forward to client
@@ -360,7 +361,7 @@ pub fn setup_delayed_proxy<F1, F2>(
 
                     // adapt seqn and ackn from server packet
                     let oldseqn = tcp.seq_num();
-                    let newseqn = oldseqn.wrapping_add(c.c_seqn);
+                    newseqn = oldseqn.wrapping_add(c.c_seqn);
                     let oldackn = tcp.ack_num();
                     let newackn = if c.c2s_inserted_bytes >= 0 {
                         oldackn.wrapping_sub(c.c2s_inserted_bytes as u32)
@@ -371,9 +372,9 @@ pub fn setup_delayed_proxy<F1, F2>(
                         tcp.set_ack_num(newackn);
                     }
                     tcp.set_seq_num(newseqn);
-                    if tcp.fin_flag() { c.seqn.seqn_fin_p2c = newseqn; }
                     c.ackn_p2c = newackn;
                 }
+                if p.headers().tcp(2).fin_flag() { c.seqn.ack_for_fin_p2c = newseqn.wrapping_add(tcp_payload_size(p) as u32 +1 ); }
 
                 prepare_checksum_and_ttl(p);
             }
@@ -742,7 +743,7 @@ pub fn setup_delayed_proxy<F1, F2>(
                                     time_adders[4].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                             } else if tcp.fin_flag() {
                                 if old_s_state >= TcpState::FinWait1 { // server in active close, client in passive or also active close
-                                    if tcp.ack_flag() && tcp.ack_num() == unsafe { c.seqn.seqn_fin_p2c.wrapping_add(1) } {
+                                    if tcp.ack_flag() && tcp.ack_num() == unsafe { c.seqn.ack_for_fin_p2c } {
                                         counter_c[TcpStatistics::RecvFinPssv] += 1;
                                         counter_s[TcpStatistics::SentFinPssv] += 1;
                                         counter_c[TcpStatistics::RecvAck4Fin] += 1;
@@ -778,7 +779,7 @@ pub fn setup_delayed_proxy<F1, F2>(
                                         c.s_set_release_cause(ReleaseCause::PassiveClose);
                                         counter_c[TcpStatistics::SentFinPssv] += 1;
                                         counter_c[TcpStatistics::SentAck4Fin] += 1;
-                                        c.seqn.seqn_fin_p2c = tcp.seq_num();
+                                        c.seqn.ack_for_fin_p2c = tcp.seq_num().wrapping_add(1);
                                         //TODO send restart to server?
                                         trace!("FIN-ACK to client, L3: { }, L4: { }", pdu.headers().ip(1), tcp);
                                     } else {
@@ -792,7 +793,7 @@ pub fn setup_delayed_proxy<F1, F2>(
                                 c.c_push_state(TcpState::Closed);
                                 c.set_release_cause(ReleaseCause::ActiveRst);
                                 release_connection = Some(c.port());
-                            } else if tcp.ack_flag() && tcp.ack_num() == unsafe { c.seqn.seqn_fin_p2c.wrapping_add(1) } && old_s_state >= TcpState::FinWait1 {
+                            } else if tcp.ack_flag() && tcp.ack_num() == unsafe { c.seqn.ack_for_fin_p2c } && old_s_state >= TcpState::FinWait1 {
                                 // ACK from client for FIN of Server
                                 match old_s_state {
                                     TcpState::FinWait1 => { c.s_push_state(TcpState::FinWait2); }
@@ -807,7 +808,7 @@ pub fn setup_delayed_proxy<F1, F2>(
                                 }
                                 counter_c[TcpStatistics::RecvAck4Fin] += 1;
                                 counter_s[TcpStatistics::SentAck4Fin] += 1;
-                            } else if old_s_state == TcpState::LastAck && tcp.ack_flag() && tcp.ack_num() == unsafe { c.seqn.seqn_fin_p2c.wrapping_add(1) } {
+                            } else if old_s_state == TcpState::LastAck && tcp.ack_flag() && tcp.ack_num() == unsafe { c.seqn.ack_for_fin_p2c } {
                                 // received final ack from client for client initiated close
                                 trace!(
                                     "{} received final ACK for client initiated close on port {}/{}",

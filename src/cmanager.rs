@@ -117,7 +117,7 @@ impl fmt::Display for Extension {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "({:?}, {:?}, {:?})",
+            "(Server, {:?}, {:?}, {:?})",
             self.states(),
             self.release_cause(),
             self.deltas_to_base_stamp()
@@ -132,7 +132,7 @@ pub union Seqn {
     /// seqn_nxt for connection from client to server, only used during connection setup
     pub f_seqn: u32,
     /// latest seqn of FIN seen for proxy to client, only used during connection release
-    pub seqn_fin_p2c: u32,
+    pub ack_for_fin_p2c: u32,
 }
 
 pub struct ProxyConnection<'a> {
@@ -332,9 +332,6 @@ impl<'a> ProxyConnection<'a> {
 }
 
 pub struct DetailedConnection {
-    //Box makes the trait object sizeable
-    //can be used by applications to store application specific connection state
-    //pub userdata: Option<Box<UserData>>,
     con_rec: Option<usize>,
     store: Option<Rc<RefCell<ProxyRecStore>>>,
 }

@@ -3,14 +3,14 @@
 ProxyEngine is a user-space TCP-proxy written in Rust with following properties
 * TCP pass-through
 * customizable delayed binding
-* high performance: almost **1 million TCP connections opened and closed per second using 3 cores**
+* high performance: more than **1 million TCP connections opened and closed per second using 3 cores**
 * multi-core, shared nothing, locking-free architecture
 * client side receive side scaling (RSS), server side receive flow steering (RFS) by NIC
 * customizable payload inspection and manipulation
 
 It may be used for intelligent load-balancing and fire-walling of TCP based protocols, e.g. LDAP. Late binding allows to select the target server not till the first payload packet after the initial three-way hand-shake is received. In addition callbacks can be defined by which the proxy can modify the payload of the TCP based protocol. For this purpose additional connection state is maintained by the ProxyEngine.
 
-First benchmarking shows that ProxyEngine can handle more than 300,000 connections per second (cps) per core. Each connection exchanges seven packets between client and server.
+
 
 Scaling happens by distributing incoming client-side TCP connections using RSS over the cores and by steering the incoming server side TCP connections to the appropriate core. This receive flow steering can be either based on the port or on the IP address of the server side connection (selected by parameter _flow_steering_ in the toml configuration file). In the first case port resources of the proxy are assigned to cores (based on paramater _dst_port_mask_ in the configuration file). In the second case each core uses a unique IP address for the server side connections.     
 
@@ -26,7 +26,7 @@ This is in obvious contrast to classical network function virtualization (NFV) c
 A very similar zero copy approach is currently followed by the Intel [NFF-Go](https://github.com/intel-go/nff-go) project.
 
 We are using the above concept of NetBricks to implement a rather complex network function, namely a pass-through TCP proxy with delayed binding. 
-The network function itself (nftcp.rs) encompasses only ~700 LOC.
+Due to the high abstraction level the network function itself (nftcp.rs) encompasses only ~700 LOC.
 This number includes already a significant amount of code for profiling, recording of TCP sessions, debugging and tracing.
 
 Some specific features of ProxyEngine are:
@@ -66,16 +66,16 @@ Latest code of ProxyEngine was tested on two different 2-socket NUMA servers, ea
 
 #### CPS Performance Test
 
-A recent performance test using [TrafficEngine](https://github.com/rstade/TrafficEngine) as traffic generator on a second server gives the result shown in the following figure.
+A recent performance test using [TrafficEngine](https://github.com/rstade/TrafficEngine) as traffic generator on a second server gives the result shown in the following figure. We used ProxyEngine v0.4.6 for this test.
 
 ![ProxyEngine performance](https://github.com/silverengine-de/proxyengine/blob/master/cps_vs_cores_proxy.png)
 
-For this test we run ProxyEngine on one to three cores of a six-core E5-2640 (32K/256K/15M L1/L2/L3 Cache) in socket 0 of a DL380p Gen8 server with 2.50 GHz and a Centos 7.5 real-time kernel. As NIC we used X710-DA2. Each connection comprises three packets each for opening and closing the connection and one short additional payload packet (seven packets in total).  We also performed the basic tuning steps to isolate the cores which are running our working threads.  The real-time kernel increases determinism significantly versus the usual Centos non-real-time kernel. For more information see [rt-tuning.md](https://github.com/rstade/TrafficEngine/blob/master/rt-tuning.md). The TCP traffic generator [TrafficEngine](https://github.com/rstade/TrafficEngine) was run on 5 cores of a DL160-Gen6 server interconnected via another 10G NIC (82599 based) to the server running ProxyEngine.
+For this test we run ProxyEngine on one to three cores of a six-core E5-2640 (32K/256K/15M L1/L2/L3 Cache) in socket 0 of a DL380p Gen8 server with 2.50 GHz and a Centos 7.5 real-time kernel. As NIC we used X710-DA2. Each connection comprises three packets each for opening and closing the connection and one short additional payload packet (seven packets in total).  We also performed the basic tuning steps to isolate the cores which are running our working threads.  The real-time kernel increases determinism significantly versus the usual Centos non-real-time kernel. For more information see [rt-tuning.md](https://github.com/rstade/TrafficEngine/blob/master/rt-tuning.md). The TCP traffic generator [TrafficEngine](https://github.com/rstade/TrafficEngine) was run on 6 cores of a DL160-Gen6 server interconnected via another 10G NIC (82599 based) to the server running ProxyEngine.
 
 More tests with larger payload per tcp connection are planned. 
 
 
-* Note 1: The tests were run with network configuration created by prepNet.uio.sh. The vfio-pci driver (prepNet.2.sh) failed when the X710-DA2 NIC was placed in a x8 PCI-slot of DL380, even after applying the [HP RMRR patch](https://support.hpe.com/hpsc/doc/public/display?docId=emr_na-c04781229&sp4ts.oid=5249566). Without patch it failed with dmesg error "Device is ineligible for IOMMU domain attach due to platform RMRR requirement", with patch it failed even worse with a hard PCI bus error.
+* Note 1: The tests were run with network configuration created by prepNet.uio.sh. The vfio-pci driver (prepNet.2.sh) failed when the X710-DA2 NIC was placed in a x8 PCI-slot of DL380, even after applying the [HP RMRR patch](https://support.hpe.com/hpsc/doc/public/display?docId=emr_na-c04781229&sp4ts.oid=5249566). Without patch it failed with dmesg error "Device is ineligible for IOMMU domain attach due to platform RMRR requirement". With patch it failed even worse with a hard PCI bus error.
 
 * Note 2: When the NIC is placed in the x4 PCI slot (slot 3) of DL380p Gen8 on first signs it appears to work, however obviously only one TX queue is active: the performance does not increase significantyl when more than one core is used as the tx-queues start to overflow, while rx queues are empty.
 
