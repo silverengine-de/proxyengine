@@ -19,22 +19,20 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc::channel;
 use std::sync::mpsc::RecvTimeoutError;
 use std::fs::File;
-use std::str::FromStr;
 use std::collections::HashMap;
 use std::vec::Vec;
 use std::error::Error;
 use std::mem;
 
-use ipnet::Ipv4Net;
 use separator::Separatable;
 
 use e2d2::config::{basic_opts, read_matches};
 use e2d2::native::zcsi::*;
-use e2d2::interface::PmdPort;
+use e2d2::interface::{ PmdPort, };
 use e2d2::scheduler::initialize_system;
 use e2d2::scheduler::StandaloneScheduler;
 
-use netfcts::initialize_flowdirector;
+use netfcts::setup_flowdirector_map;
 use netfcts::tcp_common::{ReleaseCause, TcpStatistics, L234Data, TcpState};
 use netfcts::system::{SystemData, get_mac_from_ifname};
 use netfcts::io::{ print_tcp_counters, print_rx_tx_counters};
@@ -126,7 +124,7 @@ fn delayed_binding_proxy() {
     let proxy_config_cloned = configuration.clone();
     let l234data_clone = l234data.clone();
     // this is the closure, which selects the target server to use for a new TCP connection
-    let f_by_payload= move |c: &mut ProxyConnection| {
+    let f_by_payload = move |c: &mut ProxyConnection| {
         let s = String::from_utf8(c.payload_packet.as_ref().unwrap().get_payload(2).to_vec()).unwrap();
         // read first item in string and convert to usize:
         let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
@@ -135,12 +133,11 @@ fn delayed_binding_proxy() {
         debug!("selecting {}", proxy_config_cloned.targets[remainder].id);
     };
 
-
-    let no_servers= l234data.len();
+    let no_servers = l234data.len();
     let mut last_server: u8 = 0;
     let _f_round_robbin = move |c: &mut ProxyConnection| {
-        if (last_server as usize) < no_servers-1 {
-            last_server +=1;
+        if (last_server as usize) < no_servers - 1 {
+            last_server += 1;
         } else {
             last_server = 0;
         }
@@ -176,11 +173,9 @@ fn delayed_binding_proxy() {
 
     match initialize_system(&mut netbricks_configuration) {
         Ok(mut context) => {
-            let flowdirector_map = initialize_flowdirector(
-                &context,
-                configuration.flow_steering_mode(),
-                &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap(),
-            );
+            // setup flowdirector for physical ports:
+            let flowdirector_map = setup_flowdirector_map(&context);
+
             context.start_schedulers();
             let (mtx, mrx) = channel::<MessageFrom<ProxyRecStore>>();
             let (reply_mtx, reply_mrx) = channel::<MessageTo<ProxyRecStore>>();
@@ -190,7 +185,7 @@ fn delayed_binding_proxy() {
             let mtx_clone = mtx.clone();
 
             if *configuration.engine.mode.as_ref().unwrap_or(&ProxyMode::Delayed) == ProxyMode::Delayed {
-                context.add_pipeline_to_run_tx_buffered(Box::new(
+                context.install_pipeline_on_cores(Box::new(
                     move |core: i32, pmd_ports: HashMap<String, Arc<PmdPort>>, s: &mut StandaloneScheduler| {
                         setup_pipes_delayed_proxy(
                             core,
@@ -206,14 +201,33 @@ fn delayed_binding_proxy() {
                         );
                     },
                 ));
-
-            } else { // simple proxy
+            } else {
+                // simple proxy
                 error!("simple proxy still not implemented");
             }
 
             let cores = context.active_cores.clone();
+            let associated_ports: Vec<_> = context
+                .ports
+                .values()
+                .filter(|p| p.is_physical() && p.kni_name().is_some())
+                .map(|p| &context.ports[p.kni_name().as_ref().unwrap().clone()])
+                .collect();
 
-            spawn_recv_thread(mrx, context, configuration.clone());
+            let proxy_addr = (
+                associated_ports[0]
+                    .net_spec()
+                    .as_ref()
+                    .unwrap()
+                    .ip_net
+                    .as_ref()
+                    .unwrap()
+                    .addr(),
+                configuration.engine.port,
+            );
+
+            spawn_recv_thread(mrx, context);
+
             mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
             thread::sleep(Duration::from_millis(500 as u64));
 
@@ -224,7 +238,9 @@ fn delayed_binding_proxy() {
                 mem::size_of::<Extension>()
             );
 
-            info!("before run: available mbufs in memory pool= {:6}", unsafe { mbuf_avail_count()} );
+            info!("before run: available mbufs in memory pool= {:6}", unsafe {
+                mbuf_avail_count()
+            });
 
             // set up servers
             for server in configuration.targets {
@@ -263,13 +279,7 @@ fn delayed_binding_proxy() {
             let timeout = Duration::from_millis(2000 as u64);
 
             for ntry in 0..configuration.test_size.unwrap() {
-                match TcpStream::connect_timeout(
-                    &SocketAddr::from((
-                        configuration.engine.ipnet.parse::<Ipv4Net>().unwrap().addr(),
-                        configuration.engine.port,
-                    )),
-                    timeout,
-                ) {
+                match TcpStream::connect_timeout(&SocketAddr::from(proxy_addr), timeout) {
                     Ok(mut stream) => {
                         debug!("test connection {}: TCP connect to proxy successful", ntry);
                         stream.set_write_timeout(Some(timeout)).unwrap();
@@ -300,12 +310,13 @@ fn delayed_binding_proxy() {
 
             thread::sleep(Duration::from_millis(200)); // Sleep for a bit
 
-
             mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
             thread::sleep(Duration::from_millis(1000 as u64));
 
             mtx.send(MessageFrom::FetchCounter).unwrap();
-            if configuration.engine.detailed_records.unwrap_or(false) { mtx.send(MessageFrom::FetchCRecords).unwrap(); }
+            if configuration.engine.detailed_records.unwrap_or(false) {
+                mtx.send(MessageFrom::FetchCRecords).unwrap();
+            }
 
             let mut tcp_counters_c = HashMap::new();
             let mut tcp_counters_s = HashMap::new();
@@ -336,8 +347,9 @@ fn delayed_binding_proxy() {
                 }
             }
 
-
-            info!("after run: available mbufs in memory pool= {:6}", unsafe { mbuf_avail_count()} );
+            info!("after run: available mbufs in memory pool= {:6}", unsafe {
+                mbuf_avail_count()
+            });
             println!("\nTask Performance Data:\n");
 
             if configuration.engine.detailed_records.unwrap_or(false) {
@@ -345,14 +357,16 @@ fn delayed_binding_proxy() {
                 let mut completed_count_s = 0;
                 for (_p, con_recs) in &con_records {
                     for c in con_recs.iter_0() {
-                        if (c.release_cause() == ReleaseCause::PassiveClose || c.release_cause() == ReleaseCause::ActiveClose)
+                        if (c.release_cause() == ReleaseCause::PassiveClose
+                            || c.release_cause() == ReleaseCause::ActiveClose)
                             && c.last_state() == TcpState::Closed
                         {
                             completed_count_c += 1
                         };
                     }
                     for c in con_recs.iter_1() {
-                        if (c.release_cause() == ReleaseCause::PassiveClose || c.release_cause() == ReleaseCause::ActiveClose)
+                        if (c.release_cause() == ReleaseCause::PassiveClose
+                            || c.release_cause() == ReleaseCause::ActiveClose)
                             && c.last_state() == TcpState::Closed
                         {
                             completed_count_s += 1
@@ -363,7 +377,7 @@ fn delayed_binding_proxy() {
                 println!("\ncompleted connections c/s: {}/{}\n", completed_count_c, completed_count_s);
 
                 // write connection records into file
-                let mut file = match File::create("c_records.txt") {
+                let file = match File::create("c_records.txt") {
                     Err(why) => panic!("couldn't create c_records.txt: {}", why.description()),
                     Ok(file) => file,
                 };
@@ -377,7 +391,7 @@ fn delayed_binding_proxy() {
                         let mut completed_count = 0;
                         let mut min = c_records.iter_0().last().unwrap().clone();
                         let mut max = min.clone();
-                        c_records.iter().enumerate().for_each(|(i, (c,e))| {
+                        c_records.iter().enumerate().for_each(|(i, (c, e))| {
                             let line = format!("{:6}: {}\n        {}\n", i, c, e);
                             f.write_all(line.as_bytes()).expect("cannot write c_records");
 
@@ -395,7 +409,10 @@ fn delayed_binding_proxy() {
                             if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
                                 max = c.clone()
                             }
-                            if i == (c_records.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some() {
+                            if i == (c_records.len() - 1)
+                                && min.get_first_stamp().is_some()
+                                && max.get_last_stamp().is_some()
+                            {
                                 let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
                                 info!(
                                     "total used cycles= {}, per connection = {}",
@@ -409,31 +426,20 @@ fn delayed_binding_proxy() {
                             tcp_counters_s.get(&p).unwrap()[TcpStatistics::SentSyn]
                                 + tcp_counters_c.get(&p).unwrap()[TcpStatistics::SentSyn]
                         );
-
                     }
                 }
 
-
                 f.flush().expect("cannot flush BufWriter");
-
 
                 assert_eq!(configuration.test_size.unwrap(), completed_count_c);
                 assert_eq!(configuration.test_size.unwrap(), completed_count_s);
-
             }
 
             for (p, counters) in tcp_counters_s {
+                assert_eq!(counters[TcpStatistics::SentSyn], counters[TcpStatistics::SentSynAck2]);
+                assert_eq!(counters[TcpStatistics::SentSynAck2], counters[TcpStatistics::RecvSynAck]);
                 assert_eq!(
-                    counters[TcpStatistics::SentSyn],
-                    counters[TcpStatistics::SentSynAck2]
-                );
-                assert_eq!(
-                    counters[TcpStatistics::SentSynAck2],
-                    counters[TcpStatistics::RecvSynAck]
-                );
-                assert_eq!(
-                    counters[TcpStatistics::RecvFin]
-                        + counters[TcpStatistics::RecvFinPssv],
+                    counters[TcpStatistics::RecvFin] + counters[TcpStatistics::RecvFinPssv],
                     tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvFinPssv]
                         + tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvFin]
                 );
@@ -443,20 +449,15 @@ fn delayed_binding_proxy() {
                         <= tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvAck4Fin]
                 );
                 assert!(
-                    counters[TcpStatistics::SentFin]
-                        + counters[TcpStatistics::SentFinPssv]
+                    counters[TcpStatistics::SentFin] + counters[TcpStatistics::SentFinPssv]
                         <= counters[TcpStatistics::RecvAck4Fin]
                 );
-                assert_eq!(
-                    counters[TcpStatistics::SentSyn],
-                    counters[TcpStatistics::SentPayload]
-                );
+                assert_eq!(counters[TcpStatistics::SentSyn], counters[TcpStatistics::SentPayload]);
                 assert_eq!(
                     tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvSyn],
                     tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvPayload]
                 );
             }
-
 
             mtx.send(MessageFrom::Exit).unwrap();
             thread::sleep(Duration::from_millis(2000));

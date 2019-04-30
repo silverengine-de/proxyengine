@@ -27,7 +27,7 @@ case $TASK in
         sudo -E env "PATH=$PATH" $executable --nocapture
         ;;
     test_rfs_port)
-        export RUST_LOG="tcp_proxy=debug,test_tcp_proxy=debug,e2d2=info,netfcts=info"
+        export RUST_LOG="tcp_proxy=info,test_tcp_proxy=info,e2d2=info,netfcts=info"
         export RUST_BACKTRACE=1
         executable=`cargo test $2 $3 $4 --no-run --message-format=json --test test_tcp_proxy | jq -r 'select((.profile.test == true) and (.target.name == "test_tcp_proxy")) | .filenames[]'`
         echo $executable
@@ -52,6 +52,7 @@ case $TASK in
         ;;
     client_syn_fin)
         export RUST_LOG="tcp_proxy=info,client_syn_fin=info,e2d2=info,netfcts=info"
+        export RUST_BACKTRACE=1
         executable=`cargo test $2 $3 $4 --no-run --message-format=json --test client_syn_fin | jq -r 'select((.profile.test == true) and (.target.name == "client_syn_fin")) | .filenames[]'`
         echo $executable
         echo ./tests/client_syn_fin.toml > tests/toml_file.txt

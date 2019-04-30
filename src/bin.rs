@@ -27,19 +27,15 @@ use std::sync::mpsc::channel;
 use std::sync::mpsc::RecvTimeoutError;
 use std::thread;
 use std::time::Duration;
-//use std::net::SocketAddrV4;
 use std::convert::From;
-use std::str::FromStr;
 use std::io::{BufWriter, Write};
 use std::error::Error;
 use std::fs::File;
 use std::mem;
 
-//use uuid::Uuid;
-use ipnet::Ipv4Net;
 use separator::Separatable;
 
-use netfcts::initialize_flowdirector;
+use netfcts::setup_flowdirector_map;
 use netfcts::tcp_common::{ReleaseCause, CData, L234Data, TcpState};
 use netfcts::comm::{MessageFrom, MessageTo};
 use netfcts::system::SystemData;
@@ -166,7 +162,7 @@ pub fn main() {
 
     fn check_system(context: NetBricksContext) -> e2d2::common::Result<NetBricksContext> {
         for port in context.ports.values() {
-            if port.port_type() == &PortType::Dpdk {
+            if port.port_type() == &PortType::Physical {
                 debug!("Supported filters on port {}:", port.port_id());
                 for i in RteFilterType::RteEthFilterNone as i32 + 1..RteFilterType::RteEthFilterMax as i32 {
                     let result = unsafe { rte_eth_dev_filter_supported(port.port_id() as u16, RteFilterType::from(i)) };
@@ -187,15 +183,11 @@ pub fn main() {
         .and_then(|ctxt| check_system(ctxt))
     {
         Ok(mut context) => {
-            let flowdirector_map = initialize_flowdirector(
-                &context,
-                configuration.flow_steering_mode(),
-                &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap(),
-            );
-            unsafe {
-                fdir_get_infos(1u16);
-            }
+            // setup flowdirector for physical ports:
+            let flowdirector_map = setup_flowdirector_map(&context);
+
             context.start_schedulers();
+
             let (mtx, mrx) = channel::<MessageFrom<ProxyRecStore>>();
             let (reply_mtx, reply_mrx) = channel::<MessageTo<ProxyRecStore>>();
 
@@ -204,7 +196,7 @@ pub fn main() {
             let mtx_clone = mtx.clone();
 
             if *configuration.engine.mode.as_ref().unwrap_or(&ProxyMode::Delayed) == ProxyMode::Delayed {
-                context.add_pipeline_to_run_tx_buffered(Box::new(
+                context.install_pipeline_on_cores(Box::new(
                     move |core: i32, pmd_ports: HashMap<String, Arc<PmdPort>>, s: &mut StandaloneScheduler| {
                         setup_pipes_delayed_proxy(
                             core,
@@ -227,14 +219,8 @@ pub fn main() {
 
             let cores = context.active_cores.clone();
 
-            spawn_recv_thread(mrx, context, configuration.clone());
+            spawn_recv_thread(mrx, context);
             mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
-            // debug output on flow director:
-            if log_enabled!(log::Level::Debug) {
-                unsafe {
-                    fdir_get_infos(1u16);
-                }
-            }
 
             info!(
                 "Connection record sizes = {} + {} + {}",

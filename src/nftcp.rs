@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Sender, channel};
 use std::collections::HashMap;
+use std::convert::TryFrom;
 
 use uuid::Uuid;
 
@@ -28,9 +29,9 @@ use netfcts::make_reply_packet;
 #[cfg(feature = "profiling")]
 use netfcts::utils::TimeAdder;
 
-use EngineConfig;
+use ::{EngineConfig, FnSelectServer};
 use {PipelineId, MessageFrom, MessageTo, TaskType};
-use Timeouts;
+use ::{Timeouts, FnPayload};
 use ProxyRecStore;
 
 const MIN_FRAME_SIZE: usize = 60; // without fcs
@@ -41,19 +42,19 @@ const TIMER_WHEEL_SLOT_CAPACITY: usize = 2500;
 
 pub fn setup_delayed_proxy<F1, F2>(
     core: i32,
-    pci: &CacheAligned<PortQueueTxBuffered>,
-    kni: &CacheAligned<PortQueue>,
+    pci: CacheAligned<PortQueueTxBuffered>,
+    kni: CacheAligned<PortQueue>,
     sched: &mut StandaloneScheduler,
     engine_config: &EngineConfig,
     servers: Vec<L234Data>,
-    flowdirector_map: HashMap<u16, Arc<FlowDirector>>,
-    tx: Sender<MessageFrom<ProxyRecStore>>,
+    flowdirector_map: &HashMap<u16, Arc<FlowDirector>>,
+    tx: &Sender<MessageFrom<ProxyRecStore>>,
     system_data: SystemData,
     f_select_server: F1,
     f_process_payload_c_s: F2,
 ) where
-    F1: Fn(&mut ProxyConnection) + Sized + Send + Sync + 'static,
-    F2: Fn(&mut ProxyConnection, &mut [u8], usize) + Sized + Send + Sync + 'static,
+    F1: FnSelectServer,
+    F2: FnPayload,
 {
     let l4flow_for_this_core = flowdirector_map
         .get(&pci.port_queue.port_id())
@@ -68,10 +69,12 @@ pub fn setup_delayed_proxy<F1, F2>(
         ip_s: u32,
     }
 
-    let me = Me {
-        l234: engine_config.get_l234data(),
+    let mut me = Me {
+        l234: TryFrom::try_from(kni.port.net_spec().as_ref().unwrap().clone()).unwrap(),
         ip_s: l4flow_for_this_core.ip,
     };
+
+    me.l234.port = engine_config.port;
 
     let pipeline_id = PipelineId {
         core: core as u16,
@@ -111,12 +114,11 @@ pub fn setup_delayed_proxy<F1, F2>(
     tx.send(MessageFrom::Channel(pipeline_id.clone(), remote_tx)).unwrap();
 
     // forwarding frames coming from KNI to PCI, if we are the kni core
-    if pci.port_queue.rxq() == 0 {
-        let forward2pci = ReceiveBatch::new(kni.clone()).send(pci.clone());
-        let uuid = Uuid::new_v4();
-        let name = String::from("Kni2Pci");
-        sched.add_runnable(Runnable::from_task(uuid, name, forward2pci).move_ready());
-    }
+
+    let forward2pci = ReceiveBatch::new(kni.clone()).send(pci.clone());
+    let uuid = Uuid::new_v4();
+    let name = String::from("Kni2Pci");
+    sched.add_runnable(Runnable::from_task(uuid, name, forward2pci).move_ready());
 
     struct PduAllocator<'a> {
         pdu_batch: Option<Vec<Pdu<'a>>>,
@@ -229,78 +231,7 @@ pub fn setup_delayed_proxy<F1, F2>(
                 c.ackn_p2c = p.headers().tcp(2).ack_num();
                 prepare_checksum_and_ttl(p);
             }
-/*
-            fn client_to_server<F>(
-                p: &mut Pdu,
-                c: &mut ProxyConnection,
-                me: &Me,
-                servers: &Vec<L234Data>,
-                f_process_payload: F,
-            ) where
-                F: Fn(&mut ProxyConnection, &mut [u8], usize),
-            {
-                if tcp_payload_size(p) > 0 {
-                    let tailroom = p.get_tailroom();
-                    f_process_payload(c, p.get_payload_mut(2), tailroom);
-                }
 
-                let server = &servers[c.server_index()];
-                set_header(server, c.port(), p, &me.l234.mac, me.ip_s);
-
-                let chksum_offload = p.tcp_checksum_tx_offload();
-
-                let ip_client;
-                let old_ip_dst;
-                let port_client;
-                let oldackn;
-                let newackn;
-                {
-                    let h = p.headers();
-                    ip_client = h.ip(1).src();
-                    old_ip_dst = h.ip(1).dst();
-                    port_client = h.tcp(2).src_port();
-                }
-                {
-                    let tcp = p.headers_mut().tcp_mut(2);
-                    if !chksum_offload {
-                        tcp.update_checksum_incremental(port_client, c.port());
-                        tcp.update_checksum_incremental(me.l234.port, server.port);
-                        tcp.update_checksum_incremental(
-                            !finalize_checksum(ip_client),
-                            !finalize_checksum(me.ip_s),
-                        );
-                        tcp.update_checksum_incremental(
-                            !finalize_checksum(old_ip_dst),
-                            !finalize_checksum(server.ip),
-                        );
-                    }
-                    // adapt ackn of client packet
-                    oldackn = tcp.ack_num();
-                    newackn = oldackn.wrapping_sub(c.c_seqn);
-                    let oldseqn = tcp.seq_num();
-                    let newseqn = if c.c2s_inserted_bytes >= 0 {
-                        oldseqn.wrapping_add(c.c2s_inserted_bytes as u32)
-                    } else {
-                        oldseqn.wrapping_sub((-c.c2s_inserted_bytes) as u32)
-                    };
-                    if c.c2s_inserted_bytes != 0 {
-                        tcp.set_seq_num(newseqn);
-                        if !chksum_offload {
-                            tcp.update_checksum_incremental(!finalize_checksum(oldseqn), !finalize_checksum(newseqn));
-                        }
-                    }
-                    tcp.set_ack_num(newackn);
-                    c.ackn_p2s = newackn;
-                    if tcp.fin_flag() { c.seqn_fin_p2s = newseqn; }
-                }
-                if !chksum_offload {
-                    p.headers_mut().tcp_mut(2).update_checksum_incremental(!finalize_checksum(oldackn), !finalize_checksum(newackn));
-                    do_ttl(p);
-                } else {
-                    prepare_checksum_and_ttl(p);
-                }
-            }
-*/
             fn client_to_server<F>(
                 p: &mut Pdu,
                 c: &mut ProxyConnection,
@@ -374,74 +305,11 @@ pub fn setup_delayed_proxy<F1, F2>(
                     tcp.set_seq_num(newseqn);
                     c.ackn_p2c = newackn;
                 }
-                if p.headers().tcp(2).fin_flag() { c.seqn.ack_for_fin_p2c = newseqn.wrapping_add(tcp_payload_size(p) as u32 +1 ); }
+                if p.headers().tcp(2).fin_flag() { c.seqn.ack_for_fin_p2c = newseqn.wrapping_add(tcp_payload_size(p) as u32 + 1); }
 
                 prepare_checksum_and_ttl(p);
             }
 
-/*
-            fn server_to_client(
-                p: &mut Pdu,
-                c: &mut ProxyConnection,
-                me: &Me,
-            ) {
-                let oldseqn;
-                let newseqn;
-                let chksum_offload = p.tcp_checksum_tx_offload();
-                {
-                    // this is the s->c part of the stable two-way connection state
-                    // translate packets and forward to client
-                    let sock = c.sock().unwrap();
-                    let h = p.headers_mut();
-                    h.mac_mut(0).set_dmac(&c.client_mac);
-                    h.mac_mut(0).set_smac(&me.l234.mac);
-                    let ip_server = h.ip(1).src();
-                    let old_dest_ip = h.ip(1).dst();
-                    h.ip_mut(1).set_dst(sock.0);
-                    h.ip_mut(1).set_src(me.l234.ip);
-                    let tcp = h.tcp_mut(2);
-                    let server_src_port = tcp.src_port();
-                    tcp.set_src_port(me.l234.port);
-                    tcp.set_dst_port(sock.1);
-                    if !chksum_offload {
-                        tcp.update_checksum_incremental(server_src_port, me.l234.port);
-                        tcp.update_checksum_incremental(c.port(), sock.1);
-                        tcp.update_checksum_incremental(
-                            !finalize_checksum(ip_server),
-                            !finalize_checksum(me.l234.ip),
-                        );
-                        tcp.update_checksum_incremental(
-                            !finalize_checksum(old_dest_ip),
-                            !finalize_checksum(sock.0),
-                        );
-                    }
-                    // adapt seqn and ackn from server packet
-                    oldseqn = tcp.seq_num();
-                    newseqn = oldseqn.wrapping_add(c.c_seqn);
-                    let oldackn = tcp.ack_num();
-                    let newackn = if c.c2s_inserted_bytes >= 0 {
-                        oldackn.wrapping_sub(c.c2s_inserted_bytes as u32)
-                    } else {
-                        oldackn.wrapping_add((-c.c2s_inserted_bytes) as u32)
-                    };
-                    if c.c2s_inserted_bytes != 0 {
-                        tcp.set_ack_num(newackn);
-                        if !chksum_offload {
-                            tcp.update_checksum_incremental(!finalize_checksum(oldackn), !finalize_checksum(newackn));
-                        }
-                    }
-                    tcp.set_seq_num(newseqn);
-                    if tcp.fin_flag() { c.seqn.seqn_fin_p2c = newseqn; }
-                    c.ackn_p2c = newackn;
-                }
-                if !chksum_offload {
-                    p.headers_mut().tcp_mut(2).update_checksum_incremental(!finalize_checksum(oldseqn), !finalize_checksum(newseqn));
-                    do_ttl(p);
-                } else {
-                    prepare_checksum_and_ttl(p);
-                }
-            }
-*/
             /// attention: after calling select_server, p points to a different mbuf and has different headers
             /// selects the server by calling the closure, sends SYN to server
             fn select_server<F>(
@@ -852,9 +720,8 @@ pub fn setup_delayed_proxy<F1, F2>(
                                 );
                                 counter_c[TcpStatistics::Unexpected] += 1;
                                 group_index = 2;
-                            }
-                            else {
-                                trace!{"c2s: nothing to do?, tcp= {}, tcp_payload_size={}, expected ackn_for_fin ={}", tcp, tcp_payload_size(pdu), unsafe { c.seqn.ack_for_fin_p2c} };
+                            } else {
+                                trace! {"c2s: nothing to do?, tcp= {}, tcp_payload_size={}, expected ackn_for_fin ={}", tcp, tcp_payload_size(pdu), unsafe { c.seqn.ack_for_fin_p2c }};
                             }
 
                             if c.client_state() == TcpState::Closed && c.server_state() == TcpState::Closed {

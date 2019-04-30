@@ -1,5 +1,6 @@
 #![feature(box_syntax)]
 #![feature(integer_atomics)]
+#![feature(trait_alias)]
 
 // Logging
 #[macro_use]
@@ -24,7 +25,6 @@ pub use cmanager::{ProxyConnection, Extension, ProxyRecStore};
 
 use netfcts::tasks::TaskType;
 use netfcts::tasks::KniHandleRequest;
-use ipnet::Ipv4Net;
 use eui48::MacAddress;
 use uuid::Uuid;
 use separator::Separatable;
@@ -35,7 +35,7 @@ use e2d2::interface::{PmdPort, FlowDirector};
 
 use netfcts::io::print_hard_statistics;
 use nftcp::setup_delayed_proxy;
-use netfcts::{setup_kni, new_port_queues_for_core, FlowSteeringMode};
+use netfcts::{setup_kernel_interfaces, new_port_queues_for_core, physical_ports_for_core};
 use netfcts::comm::{MessageFrom, MessageTo, PipelineId};
 use netfcts::system::SystemData;
 use netfcts::tcp_common::{L234Data, UserData};
@@ -51,7 +51,9 @@ use std::sync::mpsc::Receiver;
 use std::thread;
 use std::time::Duration;
 use std::sync::mpsc::RecvTimeoutError;
-use std::str::FromStr;
+
+pub trait FnSelectServer = Fn(&mut ProxyConnection) + Sized + Send + Sync + Clone + 'static;
+pub trait FnPayload = Fn(&mut ProxyConnection, &mut [u8], usize) + Sized + Send + Sync + Clone + 'static;
 
 #[derive(Deserialize)]
 struct Config {
@@ -65,12 +67,6 @@ pub struct Configuration {
     pub test_size: Option<usize>,
 }
 
-impl Configuration {
-    pub fn flow_steering_mode(&self) -> FlowSteeringMode {
-        self.engine.flow_steering.unwrap_or(FlowSteeringMode::Port)
-    }
-}
-
 #[derive(Deserialize, Clone, PartialEq)]
 pub enum ProxyMode {
     DelayedV0,
@@ -79,26 +75,10 @@ pub enum ProxyMode {
 
 #[derive(Deserialize, Clone)]
 pub struct EngineConfig {
-    pub flow_steering: Option<FlowSteeringMode>,
-    pub namespace: String,
-    pub mac: String,
-    pub ipnet: String,
     pub timeouts: Option<Timeouts>,
     pub port: u16,
     pub detailed_records: Option<bool>,
     pub mode: Option<ProxyMode>,
-}
-
-impl EngineConfig {
-    pub fn get_l234data(&self) -> L234Data {
-        L234Data {
-            mac: MacAddress::parse_str(&self.mac).unwrap(),
-            ip: u32::from(self.ipnet.parse::<Ipv4Net>().unwrap().addr()),
-            port: self.port,
-            server_id: "Engine".to_string(),
-            index: 0,
-        }
-    }
 }
 
 #[derive(Deserialize, Clone)]
@@ -137,7 +117,9 @@ impl Timeouts {
 pub fn read_config(filename: &str) -> e2d2::common::Result<Configuration> {
     let mut toml_str = String::new();
     if File::open(filename)
-        .and_then(|mut f| f.read_to_string(&mut toml_str)).is_err() {
+        .and_then(|mut f| f.read_to_string(&mut toml_str))
+        .is_err()
+    {
         return Err(E2d2ErrorKind::ConfigurationError(format!("Could not read file {}", filename)));
     }
 
@@ -148,13 +130,7 @@ pub fn read_config(filename: &str) -> e2d2::common::Result<Configuration> {
         Err(err) => return Err(err.into()),
     };
 
-    match config.proxyengine.engine.ipnet.parse::<Ipv4Net>() {
-        Ok(_) => match config.proxyengine.engine.mac.parse::<MacAddress>() {
-            Ok(_) => Ok(config.proxyengine),
-            Err(e) => Err(e.into()),
-        },
-        Err(e) => Err(e.into()),
-    }
+    Ok(config.proxyengine)
 }
 
 struct MyData {
@@ -217,49 +193,77 @@ pub fn setup_pipes_delayed_proxy<F1, F2>(
     f_select_server: F1,
     f_process_payload_c_s: F2,
 ) where
-    F1: Fn(&mut ProxyConnection) + Sized + Send + Sync + 'static,
-    F2: Fn(&mut ProxyConnection, &mut [u8], usize) + Sized + Send + Sync + 'static,
+    F1: FnSelectServer,
+    F2: FnPayload,
 {
-    let (pci, kni) = new_port_queues_for_core(core, &pmd_ports);
-    assert_eq!(pci.port_queue.port_id(), kni.port_id());
+    for pmd_port in physical_ports_for_core(core, &pmd_ports) {
+        debug!("setup_pipelines for {} on core {}:", pmd_port.name(), core);
+        let mut kni_port = None;
+        if pmd_port.kni_name().is_some() {
+            kni_port = pmd_ports.get(pmd_port.kni_name().unwrap());
+        }
+        let (pci, kni) = new_port_queues_for_core(core, &pmd_port, kni_port);
+        if pci.is_some() {
+            debug!(
+                "pmd_port= {}, rxq= {}",
+                pci.as_ref().unwrap().port_queue.port,
+                pci.as_ref().unwrap().port_queue.rxq()
+            );
+        } else {
+            debug!("pmd_port= None");
+        }
 
-    let uuid = Uuid::new_v4();
-    let name = String::from("KniHandleRequest");
+        if kni.is_some() {
+            debug!(
+                "associated kni= {}, rxq= {}",
+                kni.as_ref().unwrap().port,
+                kni.as_ref().unwrap().rxq()
+            );
+        } else {
+            debug!("associated kni= None");
+        }
 
-    if pci.port_queue.rxq() == 0 {
-        sched.add_runnable(
-            Runnable::from_task(
-                uuid,
-                name,
-                KniHandleRequest {
-                    kni_port: kni.port.clone(),
-                    last_tick: 0,
-                },
-            )
-            .move_ready(), // this task must be ready from the beginning to enable managing the KNI i/f
-        );
+        let uuid = Uuid::new_v4();
+        let name = String::from("KniHandleRequest");
+
+        // Kni request handler runs on first core of the associated pci port (rxq == 0)
+        if pci.is_some()
+            && kni.is_some()
+            && kni.as_ref().unwrap().port.is_native_kni()
+            && pci.as_ref().unwrap().port_queue.rxq() == 0
+        {
+            sched.add_runnable(
+                Runnable::from_task(
+                    uuid,
+                    name,
+                    KniHandleRequest {
+                        kni_port: kni.as_ref().unwrap().port.clone(),
+                        last_tick: 0,
+                    },
+                )
+                .move_ready(), // this task must be ready from the beginning to enable managing the KNI i/f
+            );
+        }
+
+        if pci.is_some() && kni.is_some() {
+            setup_delayed_proxy(
+                core,
+                pci.unwrap(),
+                kni.unwrap(),
+                sched,
+                engine_config,
+                servers.clone(),
+                &flowdirector_map,
+                &tx,
+                system_data.clone(),
+                f_select_server.clone(),
+                f_process_payload_c_s.clone(),
+            );
+        }
     }
-
-    setup_delayed_proxy(
-        core,
-        &pci,
-        &kni,
-        sched,
-        engine_config,
-        servers,
-        flowdirector_map,
-        tx,
-        system_data,
-        f_select_server,
-        f_process_payload_c_s,
-    );
 }
 
-pub fn spawn_recv_thread(
-    mrx: Receiver<MessageFrom<ProxyRecStore>>,
-    mut context: NetBricksContext,
-    configuration: Configuration,
-) {
+pub fn spawn_recv_thread(mrx: Receiver<MessageFrom<ProxyRecStore>>, mut context: NetBricksContext) {
     /*
         mrx: receiver for messages from all the pipelines running
     */
@@ -272,29 +276,8 @@ pub fn spawn_recv_thread(
             tasks.push(Vec::<(PipelineId, Uuid)>::with_capacity(16));
         }
         context.execute_schedulers();
-        // set up kni
-        debug!("Number of PMD ports: {}", PmdPort::num_pmd_ports());
-        for port in context.ports.values() {
-            debug!(
-                "port {}:{} -- mac_address= {}",
-                port.port_type(),
-                port.port_id(),
-                port.mac_address()
-            );
-            if port.is_kni() {
-                setup_kni(
-                    port.linux_if().unwrap(),
-                    &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap(),
-                    &configuration.engine.mac,
-                    &configuration.engine.namespace,
-                    if configuration.flow_steering_mode() == FlowSteeringMode::Ip {
-                        context.active_cores.len() + 1
-                    } else {
-                        1
-                    },
-                );
-            }
-        }
+
+        setup_kernel_interfaces(&context);
 
         loop {
             match mrx.recv_timeout(Duration::from_millis(60000)) {

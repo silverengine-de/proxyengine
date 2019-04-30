@@ -20,7 +20,6 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::mpsc::channel;
 use std::fs::File;
 use std::collections::{HashMap};
-use std::str::FromStr;
 use std::sync::mpsc::RecvTimeoutError;
 
 use ipnet::Ipv4Net;
@@ -28,11 +27,11 @@ use separator::Separatable;
 
 use e2d2::config::{basic_opts, read_matches};
 use e2d2::native::zcsi::*;
-use e2d2::interface::PmdPort;
+use e2d2::interface::{PmdPort, };
 use e2d2::scheduler::initialize_system;
 use e2d2::scheduler::StandaloneScheduler;
 
-use netfcts::initialize_flowdirector;
+use netfcts::setup_flowdirector_map;
 use netfcts::tcp_common::{ReleaseCause, L234Data, TcpState};
 use netfcts::system::{SystemData, get_mac_from_ifname};
 use netfcts::io::{ print_tcp_counters, print_rx_tx_counters};
@@ -138,11 +137,9 @@ fn delayed_binding_proxy() {
 
     match initialize_system(&mut netbricks_configuration) {
         Ok(mut context) => {
-            let flowdirector_map = initialize_flowdirector(
-                &context,
-                configuration.flow_steering_mode(),
-                &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap(),
-            );
+            // setup flowdirector for physical ports:
+            let flowdirector_map = setup_flowdirector_map(&context);
+
             context.start_schedulers();
             let (mtx, mrx) = channel::<MessageFrom<ProxyRecStore>>();
             let (reply_mtx, reply_mrx) = channel::<MessageTo<ProxyRecStore>>();
@@ -151,7 +148,7 @@ fn delayed_binding_proxy() {
             let system_data_cloned = system_data.clone();
             let mtx_clone = mtx.clone();
 
-            context.add_pipeline_to_run_tx_buffered(Box::new(
+            context.install_pipeline_on_cores(Box::new(
                 move |core: i32, pmd_ports: HashMap<String, Arc<PmdPort>>, s: &mut StandaloneScheduler| {
                     setup_pipes_delayed_proxy(
                         core,
@@ -169,16 +166,30 @@ fn delayed_binding_proxy() {
             ));
 
             let cores = context.active_cores.clone();
+            let associated_ports: Vec<_> = context
+                .ports
+                .values()
+                .filter(|p| p.is_physical() && p.kni_name().is_some())
+                .map(|p| &context.ports[p.kni_name().as_ref().unwrap().clone()])
+                .collect();
 
-            spawn_recv_thread(mrx, context, configuration.clone());
+            let proxy_addr = (
+                associated_ports[0]
+                    .net_spec()
+                    .as_ref()
+                    .unwrap()
+                    .ip_net
+                    .as_ref()
+                    .unwrap()
+                    .addr(),
+                configuration.engine.port,
+            );
+
+            spawn_recv_thread(mrx, context);
             mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
 
             // emulate clients
             let queries = configuration.test_size.unwrap();
-            let proxy_addr = (
-                configuration.engine.ipnet.parse::<Ipv4Net>().unwrap().addr(),
-                configuration.engine.port,
-            );
             // for this test tcp client timeout must be shorter than timeouts by timer wheel
             let timeout = Duration::from_millis(50 as u64);
 
