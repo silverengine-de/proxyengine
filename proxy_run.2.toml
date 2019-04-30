@@ -19,5 +19,6 @@ targets      = [ { id = "tcpgen_0", ip = "192.168.222.2", mac="a0:36:9f:82:9c:fc
                  { id = "tcpgen_1", ip = "192.168.222.2", mac="a0:36:9f:82:9c:fc" , port = 57343 },
                  { id = "tcpgen_2", ip = "192.168.222.2", mac="a0:36:9f:82:9c:fc" , port = 49151 },
                  { id = "tcpgen_3", ip = "192.168.222.2", mac="a0:36:9f:82:9c:fc" , port = 40959 },
-                 { id = "tcpgen_4", ip = "192.168.222.2", mac="a0:36:9f:82:9c:fc" , port = 32767 },
+             #    { id = "tcpgen_4", ip = "192.168.222.2", mac="a0:36:9f:82:9c:fc" , port = 32767 },
+             #    { id = "tcpgen_5", ip = "192.168.222.2", mac="a0:36:9f:82:9c:fc" , port = 24575 },
               ]

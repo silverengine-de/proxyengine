@@ -303,7 +303,7 @@ pub fn main() {
                 info!("completed connections c/s: {}/{}", completed_count_c, completed_count_s);
 
                 // write connection records into a file:
-                let mut file = match File::create("c_records.txt") {
+                let file = match File::create("c_records.txt") {
                     Err(why) => panic!("couldn't create c_records.txt: {}", why.description()),
                     Ok(file) => file,
                 };
