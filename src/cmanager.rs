@@ -13,8 +13,9 @@ use e2d2::utils;
 use netfcts::timer_wheel::TimerWheel;
 use netfcts::tcp_common::*;
 use netfcts::Store64;
-use netfcts::{Storable, SimpleStore, HasTcpState};
-use netfcts::TIME_STAMP_REDUCTION_FACTOR;
+use netfcts::{Storable, SimpleStore};
+use netfcts::conrecord::HasTcpState;
+use netfcts::conrecord::TIME_STAMP_REDUCTION_FACTOR;
 use netfcts::utils::shuffle_ports;
 //use netfcts::utils::Sock2Index;
 #[cfg(feature = "profiling")]

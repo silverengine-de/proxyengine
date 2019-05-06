@@ -6,33 +6,31 @@ use e2d2::interface::*;
 use e2d2::queues::{new_mpsc_queue_pair, MpscProducer};
 use e2d2::utils;
 
-use std::sync::Arc;
 #[cfg(feature = "profiling")]
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{Sender, channel};
-use std::collections::HashMap;
+use std::sync::mpsc::channel;
 use std::convert::TryFrom;
 
 use uuid::Uuid;
 
 use cmanager::{ProxyConnection, ConnectionManager};
 use netfcts::timer_wheel::TimerWheel;
-use netfcts::system::SystemData;
 use netfcts::tcp_common::*;
 use netfcts::tasks;
 use netfcts::tasks::private_etype;
-use netfcts::prepare_checksum_and_ttl;
+use netfcts::{prepare_checksum_and_ttl, RunConfiguration};
 use netfcts::set_header;
 use netfcts::remove_tcp_options;
 use netfcts::make_reply_packet;
+use netfcts::recstore::Store64;
 
 #[cfg(feature = "profiling")]
 use netfcts::utils::TimeAdder;
 
-use ::{EngineConfig, FnSelectServer};
+use ::{Configuration, FnSelectServer};
 use {PipelineId, MessageFrom, MessageTo, TaskType};
 use ::{Timeouts, FnPayload};
-use ProxyRecStore;
+use ::{ProxyRecStore, Extension};
 
 const MIN_FRAME_SIZE: usize = 60; // without fcs
 
@@ -45,18 +43,16 @@ pub fn setup_delayed_proxy<F1, F2>(
     pci: CacheAligned<PortQueueTxBuffered>,
     kni: CacheAligned<PortQueue>,
     sched: &mut StandaloneScheduler,
-    engine_config: &EngineConfig,
+    run_configuration: RunConfiguration<Configuration,Store64<Extension>>,
     servers: Vec<L234Data>,
-    flowdirector_map: &HashMap<u16, Arc<FlowDirector>>,
-    tx: &Sender<MessageFrom<ProxyRecStore>>,
-    system_data: SystemData,
     f_select_server: F1,
     f_process_payload_c_s: F2,
 ) where
     F1: FnSelectServer,
     F2: FnPayload,
 {
-    let l4flow_for_this_core = flowdirector_map
+    let l4flow_for_this_core = run_configuration
+        .flowdirector_map
         .get(&pci.port_queue.port_id())
         .unwrap()
         .get_flow(pci.port_queue.rxq());
@@ -74,7 +70,9 @@ pub fn setup_delayed_proxy<F1, F2>(
         ip_s: l4flow_for_this_core.ip,
     };
 
-    me.l234.port = engine_config.port;
+    me.l234.port = run_configuration.engine_configuration.engine.port;
+    let engine_config = &run_configuration.engine_configuration.engine;
+    let system_data = run_configuration.system_data.clone();
 
     let pipeline_id = PipelineId {
         core: core as u16,
@@ -82,6 +80,7 @@ pub fn setup_delayed_proxy<F1, F2>(
         rxq: pci.port_queue.rxq(),
     };
     debug!("enter setup_forwarder {}", pipeline_id);
+    let tx = run_configuration.remote_sender.clone();
     let detailed_records = engine_config.detailed_records.unwrap_or(false);
     let mut cm: ConnectionManager = ConnectionManager::new(pci.port_queue.clone(), *l4flow_for_this_core, detailed_records);
 

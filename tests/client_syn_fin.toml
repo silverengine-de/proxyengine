@@ -12,7 +12,7 @@ ports       = [
               ] 
 vdev        = [ "net_kni0" ]    # for use of vdev with KNI PMD, see https://dpdk.org/doc/guides/nics/kni.html
 
-[proxyengine]
+[engine]
 
 engine      = { port=999, timeouts= { established= 5000 }, detailed_records= true }
 

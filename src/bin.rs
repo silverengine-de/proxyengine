@@ -14,16 +14,13 @@ extern crate netfcts;
 extern crate ipnet;
 extern crate separator;
 
-use e2d2::config::{basic_opts, read_matches};
-use e2d2::interface::{ PortType, PmdPort};
-use e2d2::native::zcsi::*;
-use e2d2::scheduler::{initialize_system, NetBricksContext, StandaloneScheduler};
+use e2d2::interface::PmdPort;
+use e2d2::scheduler::StandaloneScheduler;
+use e2d2::native::zcsi::mbuf_avail_count;
 
 use std::collections::{HashMap};
-use std::env;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::channel;
 use std::sync::mpsc::RecvTimeoutError;
 use std::thread;
 use std::time::Duration;
@@ -35,65 +32,102 @@ use std::mem;
 
 use separator::Separatable;
 
-use netfcts::setup_flowdirector_map;
 use netfcts::tcp_common::{ReleaseCause, CData, L234Data, TcpState};
-use netfcts::comm::{MessageFrom, MessageTo};
-use netfcts::system::SystemData;
+use netfcts::comm::{MessageFrom, MessageTo, PipelineId};
 use netfcts::io::{ print_tcp_counters };
 #[cfg(feature = "profiling")]
 use netfcts::io::print_rx_tx_counters;
 use netfcts::system::get_mac_from_ifname;
-use netfcts::{HasTcpState, HasConData, ConRecord};
+use netfcts::recstore::Store64;
+use netfcts::conrecord::{HasTcpState, HasConData, ConRecord};
+use netfcts::RunTime;
 
-use tcp_proxy::{read_config, setup_pipes_delayed_proxy};
-use tcp_proxy::{ProxyConnection, ProxyRecStore, Extension, ProxyMode};
-//use tcp_proxy::Container;
-use tcp_proxy::spawn_recv_thread;
+use tcp_proxy::setup_pipes_delayed_proxy;
+use tcp_proxy::{ProxyConnection, Extension, ProxyMode, Configuration};
 
-pub fn main() {
-    env_logger::init();
-    info!("Starting ProxyEngine ..");
-
-    let log_level_rte = if log_enabled!(log::Level::Debug) {
-        RteLogLevel::RteLogDebug
-    } else {
-        RteLogLevel::RteLogInfo
-    };
-    unsafe {
-        rte_log_set_global_level(log_level_rte);
-        rte_log_set_level(RteLogtype::RteLogtypePmd, log_level_rte);
-        info!("dpdk log global level: {}", rte_log_get_global_level());
-        info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
-    }
-
-    let system_data = SystemData::detect();
-
-    // read config file name from command line
-    let args: Vec<String> = env::args().collect();
-    let config_file;
-    if args.len() > 1 {
-        config_file = args[1].clone();
-    } else {
-        println!("try 'proxy_engine <toml configuration file>'\n");
-        std::process::exit(1);
-    }
-
-    let configuration = read_config(&config_file).unwrap();
-
-    fn am_root() -> bool {
-        match env::var("USER") {
-            Ok(val) => val == "root",
-            Err(_e) => false,
+fn write_and_evaluate_records(con_records: &mut HashMap<PipelineId, Store64<Extension>>) {
+    let mut completed_count_c = 0;
+    let mut completed_count_s = 0;
+    for con_recs in con_records.values() {
+        for c in con_recs.iter_0() {
+            if (c.release_cause() == ReleaseCause::PassiveClose || c.release_cause() == ReleaseCause::ActiveClose)
+                && c.last_state() == TcpState::Closed
+            {
+                completed_count_c += 1
+            };
+        }
+        for c in con_recs.iter_1() {
+            if (c.release_cause() == ReleaseCause::PassiveClose || c.release_cause() == ReleaseCause::ActiveClose)
+                && c.last_state() == TcpState::Closed
+            {
+                completed_count_s += 1
+            };
         }
     }
 
-    if !am_root() {
-        error!(
-            " ... must run as root, e.g.: sudo -E env \"PATH=$PATH\" $executable, see also test.sh\n\
-             Do not run 'cargo test' as root."
-        );
-        std::process::exit(1);
+    info!("completed connections c/s: {}/{}", completed_count_c, completed_count_s);
+
+    // write connection records into a file:
+    let file = match File::create("c_records.txt") {
+        Err(why) => panic!("couldn't create c_records.txt: {}", why.description()),
+        Ok(file) => file,
+    };
+    let mut f = BufWriter::new(file);
+
+    for (p, c_records) in con_records {
+        info!("Pipeline {}:", p);
+        f.write_all(format!("Pipeline {}:\n", p).as_bytes())
+            .expect("cannot write c_records");
+
+        if c_records.len() > 0 {
+            let mut completed_count = 0;
+            let mut min = c_records.iter_0().last().unwrap().clone();
+            let mut max = min.clone();
+            c_records.sort_0_by(|a, b| a.sock().1.cmp(&b.sock().1));
+            c_records.iter().enumerate().for_each(|(i, (c, s))| {
+                let line_c = format!("{:6}: {}\n", i, c);
+                f.write_all(line_c.as_bytes()).expect("cannot write c_records for client");
+                let line_s = format!("        {}\n", s);
+                f.write_all(line_s.as_bytes()).expect("cannot write c_records for server");
+
+                if (c.release_cause() == ReleaseCause::PassiveClose || c.release_cause() == ReleaseCause::ActiveClose)
+                    && c.states().last().unwrap() == &TcpState::Closed
+                {
+                    completed_count += 1
+                }
+                if c.get_first_stamp().unwrap_or(u64::max_value()) < min.get_first_stamp().unwrap_or(u64::max_value()) {
+                    min = c.clone()
+                }
+                if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
+                    max = c.clone()
+                }
+                if i == (c_records.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some() {
+                    let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
+                    info!(
+                        "total used cycles= {}, per connection = {}",
+                        total.separated_string(),
+                        (total / (i as u64 + 1)).separated_string()
+                    );
+                }
+            });
+        }
     }
+
+    f.flush().expect("cannot flush BufWriter");
+}
+
+pub fn main() {
+    let mut run_time: RunTime<Configuration, Store64<Extension>> = match RunTime::init() {
+        Ok(run_time) => run_time,
+        Err(err) => panic!("failed to initialize RunTime {}", err),
+    };
+    info!("Starting ProxyEngine ..");
+
+    // setup flowdirector for physical ports:
+    run_time.setup_flowdirector().expect("failed to setup flowdirector");
+
+    let run_configuration = run_time.run_configuration.clone();
+    let configuration = &run_configuration.engine_configuration;
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -103,19 +137,8 @@ pub fn main() {
     })
     .expect("error setting Ctrl-C handler");
 
-    let opts = basic_opts();
-
-    let args: Vec<String> = vec!["proxyengine", "-f", &config_file]
-        .iter()
-        .map(|x| x.to_string())
-        .collect::<Vec<String>>();
-    let matches = match opts.parse(&args[1..]) {
-        Ok(m) => m,
-        Err(f) => panic!(f.to_string()),
-    };
-    let mut netbricks_configuration = read_matches(&matches, &opts);
-
-    let l234data: Vec<L234Data> = configuration
+    let l234data: Vec<L234Data> = run_configuration
+        .engine_configuration
         .targets
         .iter()
         .enumerate()
@@ -160,210 +183,107 @@ pub fn main() {
     // this is the closure, which may modify the payload of client to server packets in a TCP connection
     let f_process_payload_c_s = |_c: &mut ProxyConnection, _payload: &mut [u8], _tailroom: usize| {};
 
-    fn check_system(context: NetBricksContext) -> e2d2::common::Result<NetBricksContext> {
-        for port in context.ports.values() {
-            if port.port_type() == &PortType::Physical {
-                debug!("Supported filters on port {}:", port.port_id());
-                for i in RteFilterType::RteEthFilterNone as i32 + 1..RteFilterType::RteEthFilterMax as i32 {
-                    let result = unsafe { rte_eth_dev_filter_supported(port.port_id() as u16, RteFilterType::from(i)) };
-                    debug!(
-                        "{:<50}: {}(rc={})",
-                        RteFilterType::from(i),
-                        if result == 0 { "supported" } else { "not supported" },
-                        result
-                    );
-                }
-            }
-        }
-        Ok(context)
-    }
+    run_time.start_schedulers().expect("cannot start schedulers");
 
-    match initialize_system(&mut netbricks_configuration)
-        .map_err(|e| e.into())
-        .and_then(|ctxt| check_system(ctxt))
+    if *run_configuration
+        .engine_configuration
+        .engine
+        .mode
+        .as_ref()
+        .unwrap_or(&ProxyMode::Delayed)
+        == ProxyMode::Delayed
     {
-        Ok(mut context) => {
-            // setup flowdirector for physical ports:
-            let flowdirector_map = setup_flowdirector_map(&context);
+        let run_configuration_cloned = run_configuration.clone();
+        run_time
+            .install_pipeline_on_cores(Box::new(
+                move |core: i32, pmd_ports: HashMap<String, Arc<PmdPort>>, s: &mut StandaloneScheduler| {
+                    setup_pipes_delayed_proxy(
+                        core,
+                        pmd_ports,
+                        s,
+                        run_configuration_cloned.clone(),
+                        l234data.clone(),
+                        f_by_payload.clone(),
+                        f_process_payload_c_s.clone(),
+                    );
+                },
+            ))
+            .expect("cannot install pipelines");;
+    } else {
+        // simple proxy
+        error!("simple proxy still not implemented");
+    }
 
-            context.start_schedulers();
+    let cores = run_time.context().unwrap().active_cores.clone();
 
-            let (mtx, mrx) = channel::<MessageFrom<ProxyRecStore>>();
-            let (reply_mtx, reply_mrx) = channel::<MessageTo<ProxyRecStore>>();
+    // start the run_time receive thread
+    run_time.start();
 
-            let configuration_clone = configuration.clone();
-            let system_data_cloned = system_data.clone();
-            let mtx_clone = mtx.clone();
+    let (mtx, reply_mrx) = run_time.get_main_channel().expect("cannot get main channel");
+    mtx.send(MessageFrom::StartEngine).unwrap();
+    thread::sleep(Duration::from_millis(2000 as u64));
 
-            if *configuration.engine.mode.as_ref().unwrap_or(&ProxyMode::Delayed) == ProxyMode::Delayed {
-                context.install_pipeline_on_cores(Box::new(
-                    move |core: i32, pmd_ports: HashMap<String, Arc<PmdPort>>, s: &mut StandaloneScheduler| {
-                        setup_pipes_delayed_proxy(
-                            core,
-                            pmd_ports,
-                            s,
-                            &configuration_clone.engine,
-                            l234data.clone(),
-                            flowdirector_map.clone(),
-                            mtx_clone.clone(),
-                            system_data_cloned.clone(),
-                            f_by_payload.clone(),
-                            f_process_payload_c_s.clone(),
-                        );
-                    },
-                ));
-            } else {
-                // simple proxy
-                error!("simple proxy still not implemented");
-            }
+    debug!(
+        "Connection record sizes = {} + {} + {}",
+        mem::size_of::<ProxyConnection>(),
+        mem::size_of::<ConRecord>(),
+        mem::size_of::<Extension>()
+    );
 
-            let cores = context.active_cores.clone();
-
-            spawn_recv_thread(mrx, context);
-            mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
-
-            info!(
-                "Connection record sizes = {} + {} + {}",
-                mem::size_of::<ProxyConnection>(),
-                mem::size_of::<ConRecord>(),
-                mem::size_of::<Extension>()
-            );
-
-            //main loop
-            println!("press ctrl-c to terminate proxy ...");
-            let mut loops: usize = 300;
-            while running.load(Ordering::SeqCst) {
-                if loops == 300 {
-                    loops = 0;
-                    info!("available mbufs in memory pool= {:6}", unsafe { mbuf_avail_count() });
-                }
-                thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
-                loops += 1;
-            }
-
-            println!("\nTask Performance Data:\n");
-            mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
-            thread::sleep(Duration::from_millis(1000 as u64));
-
-            mtx.send(MessageFrom::FetchCounter).unwrap();
-            if configuration.engine.detailed_records.unwrap_or(false) {
-                mtx.send(MessageFrom::FetchCRecords).unwrap();
-            }
-
-            let mut tcp_counters_c = HashMap::new();
-            let mut tcp_counters_s = HashMap::new();
-            let mut con_records = HashMap::new();
-
-            loop {
-                match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
-                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s, _rx_tx_stats)) => {
-                        print_tcp_counters(&pipeline_id, &tcp_counter_c, &tcp_counter_s);
-                        //#[cfg(feature = "profiling")]
-                        //print_rx_tx_counters(&pipeline_id, &_rx_tx_stats.unwrap());
-                        tcp_counters_c.insert(pipeline_id.clone(), tcp_counter_c);
-                        tcp_counters_s.insert(pipeline_id, tcp_counter_s);
-                    }
-                    Ok(MessageTo::CRecords(pipeline_id, Some(recv_con_records), _)) => {
-                        debug!("{}: received {} CRecords", pipeline_id, recv_con_records.len(),);
-                        con_records.insert(pipeline_id, recv_con_records);
-                    }
-                    Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
-                    Err(RecvTimeoutError::Timeout) => {
-                        break;
-                    }
-                    Err(e) => {
-                        error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
-                        break;
-                    }
-                }
-            }
-
-            if configuration.engine.detailed_records.unwrap_or(false) {
-                let mut completed_count_c = 0;
-                let mut completed_count_s = 0;
-                for (_p, con_recs) in &con_records {
-                    for c in con_recs.iter_0() {
-                        if (c.release_cause() == ReleaseCause::PassiveClose
-                            || c.release_cause() == ReleaseCause::ActiveClose)
-                            && c.last_state() == TcpState::Closed
-                        {
-                            completed_count_c += 1
-                        };
-                    }
-                    for c in con_recs.iter_1() {
-                        if (c.release_cause() == ReleaseCause::PassiveClose
-                            || c.release_cause() == ReleaseCause::ActiveClose)
-                            && c.last_state() == TcpState::Closed
-                        {
-                            completed_count_s += 1
-                        };
-                    }
-                }
-
-                info!("completed connections c/s: {}/{}", completed_count_c, completed_count_s);
-
-                // write connection records into a file:
-                let file = match File::create("c_records.txt") {
-                    Err(why) => panic!("couldn't create c_records.txt: {}", why.description()),
-                    Ok(file) => file,
-                };
-                let mut f = BufWriter::new(file);
-
-                for (p, mut c_records) in con_records {
-                    info!("Pipeline {}:", p);
-                    f.write_all(format!("Pipeline {}:\n", p).as_bytes())
-                        .expect("cannot write c_records");
-
-                    if c_records.len() > 0 {
-                        let mut completed_count = 0;
-                        let mut min = c_records.iter_0().last().unwrap().clone();
-                        let mut max = min.clone();
-                        c_records.sort_0_by(|a, b| a.sock().1.cmp(&b.sock().1));
-                        c_records.iter().enumerate().for_each(|(i, (c, s))| {
-                            let line_c = format!("{:6}: {}\n", i, c);
-                            f.write_all(line_c.as_bytes()).expect("cannot write c_records for client");
-                            let line_s = format!("        {}\n", s);
-                            f.write_all(line_s.as_bytes()).expect("cannot write c_records for server");
-
-                            if (c.release_cause() == ReleaseCause::PassiveClose
-                                || c.release_cause() == ReleaseCause::ActiveClose)
-                                && c.states().last().unwrap() == &TcpState::Closed
-                            {
-                                completed_count += 1
-                            }
-                            if c.get_first_stamp().unwrap_or(u64::max_value())
-                                < min.get_first_stamp().unwrap_or(u64::max_value())
-                            {
-                                min = c.clone()
-                            }
-                            if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
-                                max = c.clone()
-                            }
-                            if i == (c_records.len() - 1)
-                                && min.get_first_stamp().is_some()
-                                && max.get_last_stamp().is_some()
-                            {
-                                let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
-                                info!(
-                                    "total used cycles= {}, per connection = {}",
-                                    total.separated_string(),
-                                    (total / (i as u64 + 1)).separated_string()
-                                );
-                            }
-                        });
-                    }
-                }
-
-                f.flush().expect("cannot flush BufWriter");
-            }
-            mtx.send(MessageFrom::Exit).unwrap();
-            thread::sleep(Duration::from_millis(200 as u64)); // give threads some time to process Exit
-            info!("terminating ProxyEngine ...");
-            std::process::exit(0);
+    //main loop
+    println!("press ctrl-c to terminate proxy ...");
+    let mut loops: usize = 300;
+    while running.load(Ordering::SeqCst) {
+        if loops == 300 {
+            loops = 0;
+            info!("available mbufs in memory pool= {:6}", unsafe { mbuf_avail_count() });
         }
-        Err(ref e) => {
-            error!("Error: {}", e);
-            std::process::exit(1);
+        thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
+        loops += 1;
+    }
+
+    println!("\nTask Performance Data:\n");
+    mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
+    thread::sleep(Duration::from_millis(1000 as u64));
+
+    mtx.send(MessageFrom::FetchCounter).unwrap();
+    if configuration.engine.detailed_records.unwrap_or(false) {
+        mtx.send(MessageFrom::FetchCRecords).unwrap();
+    }
+
+    let mut tcp_counters_c = HashMap::new();
+    let mut tcp_counters_s = HashMap::new();
+    let mut con_records = HashMap::new();
+
+    loop {
+        match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
+            Ok(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s, _rx_tx_stats)) => {
+                print_tcp_counters(&pipeline_id, &tcp_counter_c, &tcp_counter_s);
+                //#[cfg(feature = "profiling")]
+                //print_rx_tx_counters(&pipeline_id, &_rx_tx_stats.unwrap());
+                tcp_counters_c.insert(pipeline_id.clone(), tcp_counter_c);
+                tcp_counters_s.insert(pipeline_id, tcp_counter_s);
+            }
+            Ok(MessageTo::CRecords(pipeline_id, Some(recv_con_records), _)) => {
+                debug!("{}: received {} CRecords", pipeline_id, recv_con_records.len(),);
+                con_records.insert(pipeline_id, recv_con_records);
+            }
+            Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
+            Err(RecvTimeoutError::Timeout) => {
+                break;
+            }
+            Err(e) => {
+                error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
+                break;
+            }
         }
     }
+
+    if configuration.engine.detailed_records.unwrap_or(false) {
+        write_and_evaluate_records(&mut con_records);
+    }
+    mtx.send(MessageFrom::Exit).unwrap();
+    thread::sleep(Duration::from_millis(200 as u64)); // give threads some time to process Exit
+    info!("terminating ProxyEngine ...");
+    std::process::exit(0);
 }

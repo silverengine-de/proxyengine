@@ -14,7 +14,7 @@ ports       = [
               ] 
 vdev        = [ "net_kni0" ]    # for use of vdev with KNI PMD, see https://dpdk.org/doc/guides/nics/kni.html
 
-[proxyengine]
+[engine]
 
 engine      = { port=999, detailed_records= true }
 # select non exiting server addresses for the timeout test

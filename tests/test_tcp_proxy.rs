@@ -11,80 +11,57 @@ extern crate separator;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::env;
 use std::time::Duration;
 use std::thread;
 use std::io::{Read, BufWriter, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::mpsc::channel;
 use std::sync::mpsc::RecvTimeoutError;
 use std::fs::File;
 use std::collections::HashMap;
 use std::vec::Vec;
 use std::error::Error;
 use std::mem;
+use std::process;
 
 use separator::Separatable;
 
-use e2d2::config::{basic_opts, read_matches};
 use e2d2::native::zcsi::*;
 use e2d2::interface::{ PmdPort, };
-use e2d2::scheduler::initialize_system;
 use e2d2::scheduler::StandaloneScheduler;
 
-use netfcts::setup_flowdirector_map;
 use netfcts::tcp_common::{ReleaseCause, TcpStatistics, L234Data, TcpState};
-use netfcts::system::{SystemData, get_mac_from_ifname};
+use netfcts::system::{get_mac_from_ifname};
 use netfcts::io::{ print_tcp_counters, print_rx_tx_counters};
-use netfcts::{HasTcpState, ConRecord};
+use netfcts::conrecord::{HasTcpState, ConRecord};
+use netfcts::{RunTime, Store64};
 
-use tcp_proxy::{ProxyConnection, ProxyRecStore, Extension, ProxyMode};
-use tcp_proxy::{read_config};
+use tcp_proxy::{ProxyConnection, Extension, ProxyMode, Configuration};
 use tcp_proxy::{setup_pipes_delayed_proxy};
 use netfcts::comm::{MessageFrom, MessageTo};
-use tcp_proxy::spawn_recv_thread;
 
 #[test]
 fn delayed_binding_proxy() {
-    env_logger::init();
-    info!("Testing client to server connections of ProxyEngine ..");
     // cannot directly read toml file from command line, as cargo test owns it. Thus we take a detour and read it from a file.
-    let mut f = File::open("./tests/toml_file.txt").expect("file not found");
-    let mut toml_file = String::new();
-    f.read_to_string(&mut toml_file)
-        .expect("something went wrong reading toml_file.txt");
+    const INDIRECTION_FILE: &str = "./tests/toml_file.txt";
 
-    let log_level_rte = if log_enabled!(log::Level::Debug) {
-        RteLogLevel::RteLogDebug
-    } else {
-        RteLogLevel::RteLogInfo
-    };
-    unsafe {
-        rte_log_set_global_level(log_level_rte);
-        rte_log_set_level(RteLogtype::RteLogtypePmd, log_level_rte);
-        info!("dpdk log global level: {}", rte_log_get_global_level());
-        info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
-    }
-
-    let system_data = SystemData::detect();
-
-    let configuration = read_config(toml_file.trim()).expect("cannot read config from toml file");
-    if configuration.test_size.is_none() {
-        error!("missing parameter 'test_size' in configuration file");
-        std::process::exit(1);
+    let mut run_time: RunTime<Configuration, Store64<Extension>> = match RunTime::init_indirectly(INDIRECTION_FILE) {
+        Ok(run_time) => run_time,
+        Err(err) => panic!("failed to initialize RunTime {}", err),
     };
 
-    fn am_root() -> bool {
-        match env::var("USER") {
-            Ok(val) => val == "root",
-            Err(_e) => false,
-        }
-    }
+    // setup flowdirector for physical ports:
+    run_time.setup_flowdirector().expect("failed to setup flowdirector");
 
-    if !am_root() {
-        error!(" ... must run as root, e.g.: sudo -E env \"PATH=$PATH\" $executable, see also test.sh\nDo not run 'cargo test' as root.");
-        std::process::exit(1);
-    }
+    let run_configuration = run_time.run_configuration.clone();
+    let configuration = &run_configuration.engine_configuration;
+
+    if run_configuration.engine_configuration.test_size.is_none() {
+        error!(
+            "missing parameter 'test_size' in configuration file {}",
+            run_time.toml_filename()
+        );
+        process::exit(1);
+    };
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -94,19 +71,10 @@ fn delayed_binding_proxy() {
     })
     .expect("error setting Ctrl-C handler");
 
-    let opts = basic_opts();
+    info!("Testing client to server connections of ProxyEngine ..");
 
-    let args: Vec<String> = vec!["proxyengine", "-f", toml_file.trim()]
-        .iter()
-        .map(|x| x.to_string())
-        .collect::<Vec<String>>();
-    let matches = match opts.parse(&args[1..]) {
-        Ok(m) => m,
-        Err(f) => panic!(f.to_string()),
-    };
-    let mut netbricks_configuration = read_matches(&matches, &opts);
-
-    let l234data: Vec<L234Data> = configuration
+    let l234data: Vec<L234Data> = run_configuration
+        .engine_configuration
         .targets
         .iter()
         .enumerate()
@@ -121,7 +89,7 @@ fn delayed_binding_proxy() {
         })
         .collect();
 
-    let proxy_config_cloned = configuration.clone();
+    let configuration_cloned = configuration.clone();
     let l234data_clone = l234data.clone();
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_by_payload = move |c: &mut ProxyConnection| {
@@ -130,7 +98,7 @@ fn delayed_binding_proxy() {
         let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
         let remainder = stars % l234data_clone.len();
         c.set_server_index(remainder as u8);
-        debug!("selecting {}", proxy_config_cloned.targets[remainder].id);
+        debug!("selecting {}", configuration_cloned.targets[remainder].id);
     };
 
     let no_servers = l234data.len();
@@ -171,304 +139,291 @@ fn delayed_binding_proxy() {
         } */
     };
 
-    match initialize_system(&mut netbricks_configuration) {
-        Ok(mut context) => {
-            // setup flowdirector for physical ports:
-            let flowdirector_map = setup_flowdirector_map(&context);
+    run_time.start_schedulers().expect("cannot start schedulers");
 
-            context.start_schedulers();
-            let (mtx, mrx) = channel::<MessageFrom<ProxyRecStore>>();
-            let (reply_mtx, reply_mrx) = channel::<MessageTo<ProxyRecStore>>();
+    if *run_configuration
+        .engine_configuration
+        .engine
+        .mode
+        .as_ref()
+        .unwrap_or(&ProxyMode::Delayed)
+        == ProxyMode::Delayed
+    {
+        let run_configuration_cloned = run_configuration.clone();
+        run_time
+            .install_pipeline_on_cores(Box::new(
+                move |core: i32, pmd_ports: HashMap<String, Arc<PmdPort>>, s: &mut StandaloneScheduler| {
+                    setup_pipes_delayed_proxy(
+                        core,
+                        pmd_ports,
+                        s,
+                        run_configuration_cloned.clone(),
+                        l234data.clone(),
+                        f_by_payload.clone(),
+                        f_process_payload_c_s.clone(),
+                    );
+                },
+            ))
+            .expect("cannot install pipelines");;
+    } else {
+        // simple proxy
+        error!("simple proxy still not implemented");
+    }
 
-            let configuration_clone = configuration.clone();
-            let system_data_cloned = system_data.clone();
-            let mtx_clone = mtx.clone();
+    let cores = run_time.context().unwrap().active_cores.clone();
 
-            if *configuration.engine.mode.as_ref().unwrap_or(&ProxyMode::Delayed) == ProxyMode::Delayed {
-                context.install_pipeline_on_cores(Box::new(
-                    move |core: i32, pmd_ports: HashMap<String, Arc<PmdPort>>, s: &mut StandaloneScheduler| {
-                        setup_pipes_delayed_proxy(
-                            core,
-                            pmd_ports,
-                            s,
-                            &configuration_clone.engine,
-                            l234data.clone(),
-                            flowdirector_map.clone(),
-                            mtx_clone.clone(),
-                            system_data_cloned.clone(),
-                            f_by_payload.clone(),
-                            f_process_payload_c_s.clone(),
-                        );
-                    },
-                ));
-            } else {
-                // simple proxy
-                error!("simple proxy still not implemented");
-            }
+    let associated_ports: Vec<_> = run_time
+        .context()
+        .unwrap()
+        .ports
+        .values()
+        .filter(|p| p.is_physical() && p.kni_name().is_some())
+        .map(|p| &run_time.context().unwrap().ports[p.kni_name().as_ref().unwrap().clone()])
+        .collect();
 
-            let cores = context.active_cores.clone();
-            let associated_ports: Vec<_> = context
-                .ports
-                .values()
-                .filter(|p| p.is_physical() && p.kni_name().is_some())
-                .map(|p| &context.ports[p.kni_name().as_ref().unwrap().clone()])
-                .collect();
+    let proxy_addr = (
+        associated_ports[0]
+            .net_spec()
+            .as_ref()
+            .unwrap()
+            .ip_net
+            .as_ref()
+            .unwrap()
+            .addr(),
+        configuration.engine.port,
+    );
 
-            let proxy_addr = (
-                associated_ports[0]
-                    .net_spec()
-                    .as_ref()
-                    .unwrap()
-                    .ip_net
-                    .as_ref()
-                    .unwrap()
-                    .addr(),
-                configuration.engine.port,
-            );
+    // start the run_time receive thread
+    run_time.start();
 
-            spawn_recv_thread(mrx, context);
+    let (mtx, reply_mrx) = run_time.get_main_channel().expect("cannot get main channel");
+    mtx.send(MessageFrom::StartEngine).unwrap();
+    thread::sleep(Duration::from_millis(2000 as u64));
 
-            mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
-            thread::sleep(Duration::from_millis(500 as u64));
+    debug!(
+        "Connection record sizes = {} + {} + {}",
+        mem::size_of::<ProxyConnection>(),
+        mem::size_of::<ConRecord>(),
+        mem::size_of::<Extension>()
+    );
 
-            info!(
-                "Connection record sizes = {} + {} + {}",
-                mem::size_of::<ProxyConnection>(),
-                mem::size_of::<ConRecord>(),
-                mem::size_of::<Extension>()
-            );
+    debug!("before run: available mbufs in memory pool= {:6}", unsafe {
+        mbuf_avail_count()
+    });
 
-            info!("before run: available mbufs in memory pool= {:6}", unsafe {
-                mbuf_avail_count()
-            });
+    // give threads some time to do initialization work
+    thread::sleep(Duration::from_millis(1000 as u64));
 
-            // set up servers
-            for server in configuration.targets {
-                let target_port = server.port; // moved into thread
-                let target_ip = server.ip;
-                let id = server.id;
-                thread::spawn(move || match TcpListener::bind((target_ip, target_port)) {
-                    Ok(listener1) => {
-                        debug!("bound server {} to {}:{}", id, target_ip, target_port);
-                        for stream in listener1.incoming() {
-                            let mut stream = stream.unwrap();
-                            let mut buf = [0u8; 256];
-                            stream.read(&mut buf[..]).unwrap();
-                            debug!("server {} received: {}", id, String::from_utf8(buf.to_vec()).unwrap());
-                            stream
-                                .write(&format!("Thank You from {}", id).to_string().into_bytes())
-                                .unwrap();
-                        }
-                    }
-                    _ => {
-                        panic!("failed to bind server {} to {}:{}", id, target_ip, target_port);
-                    }
-                });
-            }
-
-            thread::sleep(Duration::from_millis(500 as u64)); // wait for the servers
-
-            if log_enabled!(log::Level::Debug) {
-                unsafe {
-                    fdir_get_infos(1u16);
+    // set up servers
+    for server in configuration.targets.clone() {
+        let target_port = server.port; // moved into thread
+        let target_ip = server.ip;
+        let id = server.id;
+        thread::spawn(move || match TcpListener::bind((target_ip, target_port)) {
+            Ok(listener1) => {
+                debug!("bound server {} to {}:{}", id, target_ip, target_port);
+                for stream in listener1.incoming() {
+                    let mut stream = stream.unwrap();
+                    let mut buf = [0u8; 256];
+                    stream.read(&mut buf[..]).unwrap();
+                    debug!("server {} received: {}", id, String::from_utf8(buf.to_vec()).unwrap());
+                    stream
+                        .write(&format!("Thank You from {}", id).to_string().into_bytes())
+                        .unwrap();
                 }
             }
-
-            // emulate clients
-
-            let timeout = Duration::from_millis(2000 as u64);
-
-            for ntry in 0..configuration.test_size.unwrap() {
-                match TcpStream::connect_timeout(&SocketAddr::from(proxy_addr), timeout) {
-                    Ok(mut stream) => {
-                        debug!("test connection {}: TCP connect to proxy successful", ntry);
-                        stream.set_write_timeout(Some(timeout)).unwrap();
-                        stream.set_read_timeout(Some(timeout)).unwrap();
-                        match stream.write(&format!("{} stars", ntry).to_string().into_bytes()) {
-                            Ok(_) => {
-                                debug!("successfully send {} stars", ntry);
-                                let mut buf = [0u8; 256];
-                                match stream.read(&mut buf[..]) {
-                                    Ok(_) => {
-                                        debug!("on try {} we received {}", ntry, String::from_utf8(buf.to_vec()).unwrap())
-                                    }
-                                    _ => {
-                                        panic!("timeout on connection {} while waiting for answer", ntry);
-                                    }
-                                };
-                            }
-                            _ => {
-                                panic!("error when writing to test connection {}", ntry);
-                            }
-                        }
-                    }
-                    _ => {
-                        panic!("test connection {}: 3-way handshake with proxy failed", ntry);
-                    }
-                }
+            _ => {
+                panic!("failed to bind server {} to {}:{}", id, target_ip, target_port);
             }
+        });
+    }
 
-            thread::sleep(Duration::from_millis(200)); // Sleep for a bit
+    thread::sleep(Duration::from_millis(500 as u64)); // wait for the servers
 
-            mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
-            thread::sleep(Duration::from_millis(1000 as u64));
-
-            mtx.send(MessageFrom::FetchCounter).unwrap();
-            if configuration.engine.detailed_records.unwrap_or(false) {
-                mtx.send(MessageFrom::FetchCRecords).unwrap();
-            }
-
-            let mut tcp_counters_c = HashMap::new();
-            let mut tcp_counters_s = HashMap::new();
-            let mut con_records = HashMap::new();
-
-            loop {
-                match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
-                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s, rx_tx_stats)) => {
-                        print_tcp_counters(&pipeline_id, &tcp_counter_c, &tcp_counter_s);
-                        if rx_tx_stats.is_some() {
-                            print_rx_tx_counters(&pipeline_id, &rx_tx_stats.unwrap());
-                        }
-                        tcp_counters_c.insert(pipeline_id.clone(), tcp_counter_c);
-                        tcp_counters_s.insert(pipeline_id, tcp_counter_s);
-                    }
-                    Ok(MessageTo::CRecords(pipeline_id, Some(recv_con_records), _)) => {
-                        debug!("{}: received {} CRecords", pipeline_id, recv_con_records.len(),);
-                        con_records.insert(pipeline_id, recv_con_records);
-                    }
-                    Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
-                    Err(RecvTimeoutError::Timeout) => {
-                        break;
-                    }
-                    Err(e) => {
-                        error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
-                        break;
-                    }
-                }
-            }
-
-            info!("after run: available mbufs in memory pool= {:6}", unsafe {
-                mbuf_avail_count()
-            });
-            println!("\nTask Performance Data:\n");
-
-            if configuration.engine.detailed_records.unwrap_or(false) {
-                let mut completed_count_c = 0;
-                let mut completed_count_s = 0;
-                for (_p, con_recs) in &con_records {
-                    for c in con_recs.iter_0() {
-                        if (c.release_cause() == ReleaseCause::PassiveClose
-                            || c.release_cause() == ReleaseCause::ActiveClose)
-                            && c.last_state() == TcpState::Closed
-                        {
-                            completed_count_c += 1
-                        };
-                    }
-                    for c in con_recs.iter_1() {
-                        if (c.release_cause() == ReleaseCause::PassiveClose
-                            || c.release_cause() == ReleaseCause::ActiveClose)
-                            && c.last_state() == TcpState::Closed
-                        {
-                            completed_count_s += 1
-                        };
-                    }
-                }
-
-                println!("\ncompleted connections c/s: {}/{}\n", completed_count_c, completed_count_s);
-
-                // write connection records into file
-                let file = match File::create("c_records.txt") {
-                    Err(why) => panic!("couldn't create c_records.txt: {}", why.description()),
-                    Ok(file) => file,
-                };
-                let mut f = BufWriter::new(file);
-
-                for (p, c_records) in con_records {
-                    f.write_all(format!("Pipeline {}:\n", p).as_bytes())
-                        .expect("cannot write c_records");
-
-                    if c_records.len() > 0 {
-                        let mut completed_count = 0;
-                        let mut min = c_records.iter_0().last().unwrap().clone();
-                        let mut max = min.clone();
-                        c_records.iter().enumerate().for_each(|(i, (c, e))| {
-                            let line = format!("{:6}: {}\n        {}\n", i, c, e);
-                            f.write_all(line.as_bytes()).expect("cannot write c_records");
-
-                            if (c.release_cause() == ReleaseCause::PassiveClose
-                                || c.release_cause() == ReleaseCause::ActiveClose)
-                                && c.states().last().unwrap() == &TcpState::Closed
-                            {
-                                completed_count += 1
-                            }
-                            if c.get_first_stamp().unwrap_or(u64::max_value())
-                                < min.get_first_stamp().unwrap_or(u64::max_value())
-                            {
-                                min = c.clone()
-                            }
-                            if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
-                                max = c.clone()
-                            }
-                            if i == (c_records.len() - 1)
-                                && min.get_first_stamp().is_some()
-                                && max.get_last_stamp().is_some()
-                            {
-                                let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
-                                info!(
-                                    "total used cycles= {}, per connection = {}",
-                                    total.separated_string(),
-                                    (total / (i as u64 + 1)).separated_string()
-                                );
-                            }
-                        });
-                        assert_eq!(
-                            completed_count,
-                            tcp_counters_s.get(&p).unwrap()[TcpStatistics::SentSyn]
-                                + tcp_counters_c.get(&p).unwrap()[TcpStatistics::SentSyn]
-                        );
-                    }
-                }
-
-                f.flush().expect("cannot flush BufWriter");
-
-                assert_eq!(configuration.test_size.unwrap(), completed_count_c);
-                assert_eq!(configuration.test_size.unwrap(), completed_count_s);
-            }
-
-            for (p, counters) in tcp_counters_s {
-                assert_eq!(counters[TcpStatistics::SentSyn], counters[TcpStatistics::SentSynAck2]);
-                assert_eq!(counters[TcpStatistics::SentSynAck2], counters[TcpStatistics::RecvSynAck]);
-                assert_eq!(
-                    counters[TcpStatistics::RecvFin] + counters[TcpStatistics::RecvFinPssv],
-                    tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvFinPssv]
-                        + tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvFin]
-                );
-                assert!(
-                    tcp_counters_c.get(&p).unwrap()[TcpStatistics::SentFin]
-                        + tcp_counters_c.get(&p).unwrap()[TcpStatistics::SentFinPssv]
-                        <= tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvAck4Fin]
-                );
-                assert!(
-                    counters[TcpStatistics::SentFin] + counters[TcpStatistics::SentFinPssv]
-                        <= counters[TcpStatistics::RecvAck4Fin]
-                );
-                assert_eq!(counters[TcpStatistics::SentSyn], counters[TcpStatistics::SentPayload]);
-                assert_eq!(
-                    tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvSyn],
-                    tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvPayload]
-                );
-            }
-
-            mtx.send(MessageFrom::Exit).unwrap();
-            thread::sleep(Duration::from_millis(2000));
-
-            info!("terminating ProxyEngine ...");
-            println!("\nPASSED\n");
-            std::process::exit(0);
-        }
-        Err(ref e) => {
-            error!("Error: {}", e);
-            std::process::exit(1);
+    if log_enabled!(log::Level::Debug) {
+        unsafe {
+            fdir_get_infos(1u16);
         }
     }
+
+    // emulate clients
+
+    let timeout = Duration::from_millis(2000 as u64);
+
+    for ntry in 0..configuration.test_size.unwrap() {
+        match TcpStream::connect_timeout(&SocketAddr::from(proxy_addr), timeout) {
+            Ok(mut stream) => {
+                debug!("test connection {}: TCP connect to proxy successful", ntry);
+                stream.set_write_timeout(Some(timeout)).unwrap();
+                stream.set_read_timeout(Some(timeout)).unwrap();
+                match stream.write(&format!("{} stars", ntry).to_string().into_bytes()) {
+                    Ok(_) => {
+                        debug!("successfully send {} stars", ntry);
+                        let mut buf = [0u8; 256];
+                        match stream.read(&mut buf[..]) {
+                            Ok(_) => debug!("on try {} we received {}", ntry, String::from_utf8(buf.to_vec()).unwrap()),
+                            _ => {
+                                panic!("timeout on connection {} while waiting for answer", ntry);
+                            }
+                        };
+                    }
+                    _ => {
+                        panic!("error when writing to test connection {}", ntry);
+                    }
+                }
+            }
+            _ => {
+                panic!("test connection {}: 3-way handshake with proxy failed", ntry);
+            }
+        }
+    }
+
+    thread::sleep(Duration::from_millis(200)); // Sleep for a bit
+
+    mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
+    thread::sleep(Duration::from_millis(1000 as u64));
+
+    mtx.send(MessageFrom::FetchCounter).unwrap();
+    if configuration.engine.detailed_records.unwrap_or(false) {
+        mtx.send(MessageFrom::FetchCRecords).unwrap();
+    }
+
+    let mut tcp_counters_c = HashMap::new();
+    let mut tcp_counters_s = HashMap::new();
+    let mut con_records = HashMap::new();
+
+    loop {
+        match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
+            Ok(MessageTo::Counter(pipeline_id, tcp_counter_c, tcp_counter_s, rx_tx_stats)) => {
+                print_tcp_counters(&pipeline_id, &tcp_counter_c, &tcp_counter_s);
+                if rx_tx_stats.is_some() {
+                    print_rx_tx_counters(&pipeline_id, &rx_tx_stats.unwrap());
+                }
+                tcp_counters_c.insert(pipeline_id.clone(), tcp_counter_c);
+                tcp_counters_s.insert(pipeline_id, tcp_counter_s);
+            }
+            Ok(MessageTo::CRecords(pipeline_id, Some(recv_con_records), _)) => {
+                debug!("{}: received {} CRecords", pipeline_id, recv_con_records.len(),);
+                con_records.insert(pipeline_id, recv_con_records);
+            }
+            Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
+            Err(RecvTimeoutError::Timeout) => {
+                break;
+            }
+            Err(e) => {
+                error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
+                break;
+            }
+        }
+    }
+
+    info!("after run: available mbufs in memory pool= {:6}", unsafe {
+        mbuf_avail_count()
+    });
+    println!("\nTask Performance Data:\n");
+
+    if configuration.engine.detailed_records.unwrap_or(false) {
+        let mut completed_count_c = 0;
+        let mut completed_count_s = 0;
+        for (_p, con_recs) in &con_records {
+            for c in con_recs.iter_0() {
+                if (c.release_cause() == ReleaseCause::PassiveClose || c.release_cause() == ReleaseCause::ActiveClose)
+                    && c.last_state() == TcpState::Closed
+                {
+                    completed_count_c += 1
+                };
+            }
+            for c in con_recs.iter_1() {
+                if (c.release_cause() == ReleaseCause::PassiveClose || c.release_cause() == ReleaseCause::ActiveClose)
+                    && c.last_state() == TcpState::Closed
+                {
+                    completed_count_s += 1
+                };
+            }
+        }
+
+        println!("\ncompleted connections c/s: {}/{}\n", completed_count_c, completed_count_s);
+
+        // write connection records into file
+        let file = match File::create("c_records.txt") {
+            Err(why) => panic!("couldn't create c_records.txt: {}", why.description()),
+            Ok(file) => file,
+        };
+        let mut f = BufWriter::new(file);
+
+        for (p, c_records) in con_records {
+            f.write_all(format!("Pipeline {}:\n", p).as_bytes())
+                .expect("cannot write c_records");
+
+            if c_records.len() > 0 {
+                let mut completed_count = 0;
+                let mut min = c_records.iter_0().last().unwrap().clone();
+                let mut max = min.clone();
+                c_records.iter().enumerate().for_each(|(i, (c, e))| {
+                    let line = format!("{:6}: {}\n        {}\n", i, c, e);
+                    f.write_all(line.as_bytes()).expect("cannot write c_records");
+
+                    if (c.release_cause() == ReleaseCause::PassiveClose || c.release_cause() == ReleaseCause::ActiveClose)
+                        && c.states().last().unwrap() == &TcpState::Closed
+                    {
+                        completed_count += 1
+                    }
+                    if c.get_first_stamp().unwrap_or(u64::max_value()) < min.get_first_stamp().unwrap_or(u64::max_value()) {
+                        min = c.clone()
+                    }
+                    if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
+                        max = c.clone()
+                    }
+                    if i == (c_records.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some() {
+                        let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
+                        info!(
+                            "total used cycles= {}, per connection = {}",
+                            total.separated_string(),
+                            (total / (i as u64 + 1)).separated_string()
+                        );
+                    }
+                });
+                assert_eq!(
+                    completed_count,
+                    tcp_counters_s.get(&p).unwrap()[TcpStatistics::SentSyn]
+                        + tcp_counters_c.get(&p).unwrap()[TcpStatistics::SentSyn]
+                );
+            }
+        }
+
+        f.flush().expect("cannot flush BufWriter");
+
+        assert_eq!(configuration.test_size.unwrap(), completed_count_c);
+        assert_eq!(configuration.test_size.unwrap(), completed_count_s);
+    }
+
+    for (p, counters) in tcp_counters_s {
+        assert_eq!(counters[TcpStatistics::SentSyn], counters[TcpStatistics::SentSynAck2]);
+        assert_eq!(counters[TcpStatistics::SentSynAck2], counters[TcpStatistics::RecvSynAck]);
+        assert_eq!(
+            counters[TcpStatistics::RecvFin] + counters[TcpStatistics::RecvFinPssv],
+            tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvFinPssv]
+                + tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvFin]
+        );
+        assert!(
+            tcp_counters_c.get(&p).unwrap()[TcpStatistics::SentFin]
+                + tcp_counters_c.get(&p).unwrap()[TcpStatistics::SentFinPssv]
+                <= tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvAck4Fin]
+        );
+        assert!(
+            counters[TcpStatistics::SentFin] + counters[TcpStatistics::SentFinPssv] <= counters[TcpStatistics::RecvAck4Fin]
+        );
+        assert_eq!(counters[TcpStatistics::SentSyn], counters[TcpStatistics::SentPayload]);
+        assert_eq!(
+            tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvSyn],
+            tcp_counters_c.get(&p).unwrap()[TcpStatistics::RecvPayload]
+        );
+    }
+
+    mtx.send(MessageFrom::Exit).unwrap();
+    thread::sleep(Duration::from_millis(2000));
+
+    info!("terminating ProxyEngine ...");
+    println!("\nPASSED\n");
+    std::process::exit(0);
 }

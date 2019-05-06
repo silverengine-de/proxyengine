@@ -10,75 +10,51 @@ extern crate netfcts;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::env;
 use std::time::Duration;
 use std::thread;
 use std::io::Read;
 use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
-use std::sync::mpsc::channel;
 use std::collections::{ HashMap};
-use std::fs::File;
+use std::process;
 
-use e2d2::config::{basic_opts, read_matches};
-use e2d2::native::zcsi::*;
 use e2d2::interface::{ PmdPort,};
-use e2d2::scheduler::{initialize_system, StandaloneScheduler};
+use e2d2::scheduler::{ StandaloneScheduler};
 
-use netfcts::setup_flowdirector_map;
 use netfcts::tcp_common::{ReleaseCause, L234Data};
 use netfcts::comm::{ MessageFrom, MessageTo };
-use netfcts::system::{SystemData, get_mac_from_ifname};
-use netfcts::{HasTcpState};
+use netfcts::system::{get_mac_from_ifname};
+use netfcts::recstore::{Store64};
+use netfcts::conrecord::HasTcpState;
+use netfcts::RunTime;
 
 use tcp_proxy::ProxyConnection;
-use tcp_proxy::{read_config, };
+use tcp_proxy::{Configuration, Extension };
 use tcp_proxy::setup_pipes_delayed_proxy;
-use tcp_proxy::spawn_recv_thread;
-use tcp_proxy::ProxyRecStore;
 
 #[test]
 fn delayed_binding_proxy() {
-    env_logger::init();
-    info!("Testing timer_wheel of ProxyEngine ..");
     // cannot directly read toml file from command line, as cargo test owns it. Thus we take a detour and read it from a file.
-    let mut f = File::open("./tests/toml_file.txt").expect("file not found");
-    let mut toml_file = String::new();
-    f.read_to_string(&mut toml_file)
-        .expect("something went wrong reading toml_file.txt");
+    const INDIRECTION_FILE: &str = "./tests/toml_file.txt";
 
-    let log_level_rte = if log_enabled!(log::Level::Debug) {
-        RteLogLevel::RteLogDebug
-    } else {
-        RteLogLevel::RteLogInfo
-    };
-    unsafe {
-        rte_log_set_global_level(log_level_rte);
-        rte_log_set_level(RteLogtype::RteLogtypePmd, log_level_rte);
-        info!("dpdk log global level: {}", rte_log_get_global_level());
-        info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
-    }
-
-    let system_data = SystemData::detect();
-
-    let configuration = read_config(toml_file.trim()).unwrap();
-
-    if configuration.test_size.is_none() {
-        error!("missing parameter 'test_size' in configuration file");
-        std::process::exit(1);
+    let mut run_time: RunTime<Configuration, Store64<Extension>> = match RunTime::init_indirectly(INDIRECTION_FILE) {
+        Ok(run_time) => run_time,
+        Err(err) => panic!("failed to initialize RunTime {}", err),
     };
 
-    fn am_root() -> bool {
-        match env::var("USER") {
-            Ok(val) => val == "root",
-            Err(_e) => false,
-        }
-    }
+    // setup flowdirector for physical ports:
+    run_time.setup_flowdirector().expect("failed to setup flowdirector");
 
-    if !am_root() {
-        error!(" ... must run as root, e.g.: sudo -E env \"PATH=$PATH\" $executable, see also test.sh\nDo not run 'cargo test' as root.");
-        std::process::exit(1);
-    }
+    let run_configuration = run_time.run_configuration.clone();
+    let configuration = &run_configuration.engine_configuration;
+
+    if run_configuration.engine_configuration.test_size.is_none() {
+        error!(
+            "missing parameter 'test_size' in configuration file {}",
+            run_time.toml_filename()
+        );
+        process::exit(1);
+    };
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -88,17 +64,7 @@ fn delayed_binding_proxy() {
     })
     .expect("error setting Ctrl-C handler");
 
-    let opts = basic_opts();
-
-    let args: Vec<String> = vec!["proxyengine", "-f", toml_file.trim()]
-        .iter()
-        .map(|x| x.to_string())
-        .collect::<Vec<String>>();
-    let matches = match opts.parse(&args[1..]) {
-        Ok(m) => m,
-        Err(f) => panic!(f.to_string()),
-    };
-    let mut netbricks_configuration = read_matches(&matches, &opts);
+    info!("Testing early Fin of client ..");
 
     let l234data: Vec<L234Data> = configuration
         .targets
@@ -115,150 +81,147 @@ fn delayed_binding_proxy() {
         })
         .collect();
 
-    let proxy_config_cloned = configuration.clone();
+    let configuration_cloned = configuration.clone();
     let l234data_clone = l234data.clone();
     // this is the closure, which selects the target server to use for a new TCP connection
-    let f_select_server = move |c: &mut ProxyConnection| {
+    let f_by_payload = move |c: &mut ProxyConnection| {
         let s = String::from_utf8(c.payload_packet.as_ref().unwrap().get_payload(2).to_vec()).unwrap();
         // read first item in string and convert to usize:
         let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
         let remainder = stars % l234data_clone.len();
         c.set_server_index(remainder as u8);
-        info!("selecting {}", proxy_config_cloned.targets[remainder].id);
+        debug!("selecting {}", configuration_cloned.targets[remainder].id);
+    };
+
+    let no_servers = l234data.len();
+    let mut last_server: u8 = 0;
+    let _f_round_robbin = move |c: &mut ProxyConnection| {
+        if (last_server as usize) < no_servers - 1 {
+            last_server += 1;
+        } else {
+            last_server = 0;
+        }
+        c.set_server_index(last_server);
+        debug!("round robin select {}", last_server);
     };
 
     // this is the closure, which may modify the payload of client to server packets in a TCP connection
     let f_process_payload_c_s = |_c: &mut ProxyConnection, _payload: &mut [u8], _tailroom: usize| {};
 
-    match initialize_system(&mut netbricks_configuration) {
-        Ok(mut context) => {
-            // setup flowdirector for physical ports:
-            let flowdirector_map = setup_flowdirector_map(&context);
+    run_time.start_schedulers().expect("cannot start schedulers");
 
-            context.start_schedulers();
-            let (mtx, mrx) = channel::<MessageFrom<ProxyRecStore>>();
-            let (reply_mtx, reply_mrx) = channel::<MessageTo<ProxyRecStore>>();
+    let run_configuration_cloned = run_configuration.clone();
+    run_time
+        .install_pipeline_on_cores(Box::new(
+            move |core: i32, pmd_ports: HashMap<String, Arc<PmdPort>>, s: &mut StandaloneScheduler| {
+                setup_pipes_delayed_proxy(
+                    core,
+                    pmd_ports,
+                    s,
+                    run_configuration_cloned.clone(),
+                    l234data.clone(),
+                    f_by_payload.clone(),
+                    f_process_payload_c_s.clone(),
+                );
+            },
+        ))
+        .expect("cannot install pipelines");;
 
-            let proxy_config_cloned = configuration.clone();
-            let system_data_cloned = system_data.clone();
+    let associated_ports: Vec<_> = run_time
+        .context()
+        .unwrap()
+        .ports
+        .values()
+        .filter(|p| p.is_physical() && p.kni_name().is_some())
+        .map(|p| &run_time.context().unwrap().ports[p.kni_name().as_ref().unwrap().clone()])
+        .collect();
 
-            let mtx_clone = mtx.clone();
+    let proxy_addr = (
+        associated_ports[0]
+            .net_spec()
+            .as_ref()
+            .unwrap()
+            .ip_net
+            .as_ref()
+            .unwrap()
+            .addr(),
+        configuration.engine.port,
+    );
 
-            context.install_pipeline_on_cores(Box::new(
-                move |core: i32, pmd_ports: HashMap<String, Arc<PmdPort>>, s: &mut StandaloneScheduler| {
-                    setup_pipes_delayed_proxy(
-                        core,
-                        pmd_ports,
-                        s,
-                        &proxy_config_cloned.engine,
-                        l234data.clone(),
-                        flowdirector_map.clone(),
-                        mtx_clone.clone(),
-                        system_data_cloned.clone(),
-                        f_select_server.clone(),
-                        f_process_payload_c_s.clone(),
-                    );
-                },
-            ));
+    // start the run_time receive thread
+    run_time.start();
 
-            let associated_ports: Vec<_> = context
-                .ports
-                .values()
-                .filter(|p| p.is_physical() && p.kni_name().is_some())
-                .map(|p| &context.ports[p.kni_name().as_ref().unwrap().clone()])
-                .collect();
+    let (mtx, reply_mrx) = run_time.get_main_channel().expect("cannot get main channel");
+    mtx.send(MessageFrom::StartEngine).unwrap();
+    thread::sleep(Duration::from_millis(2000 as u64));
 
-            let proxy_addr = (
-                associated_ports[0]
-                    .net_spec()
-                    .as_ref()
-                    .unwrap()
-                    .ip_net
-                    .as_ref()
-                    .unwrap()
-                    .addr(),
-                configuration.engine.port,
-            );
+    // emulate clients
+    let queries = configuration.test_size.unwrap();
 
-            spawn_recv_thread(mrx, context);
+    let timeout = Duration::from_millis(6000 as u64);
 
-            mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
-
-            // emulate clients
-            let queries = configuration.test_size.unwrap();
-
-            let timeout = Duration::from_millis(6000 as u64);
-
-            const CLIENT_THREADS: usize = 10;
-            for _i in 0..CLIENT_THREADS {
-                debug!("starting thread {} with {} test_size", _i, queries);
-                thread::spawn(move || {
-                    for ntry in 0..queries {
-                        match TcpStream::connect(&SocketAddr::from(proxy_addr)) {
-                            Ok(mut stream) => {
-                                debug!("test connection {}: TCP connect to proxy successful", _i);
-                                stream.set_write_timeout(Some(timeout)).unwrap();
-                                stream.set_read_timeout(Some(timeout)).unwrap();
-                                match stream.write(&format!("{} stars", ntry).to_string().into_bytes()) {
+    const CLIENT_THREADS: usize = 10;
+    for _i in 0..CLIENT_THREADS {
+        debug!("starting thread {} with {} test_size", _i, queries);
+        thread::spawn(move || {
+            for ntry in 0..queries {
+                match TcpStream::connect(&SocketAddr::from(proxy_addr)) {
+                    Ok(mut stream) => {
+                        debug!("test connection {}: TCP connect to proxy successful", _i);
+                        stream.set_write_timeout(Some(timeout)).unwrap();
+                        stream.set_read_timeout(Some(timeout)).unwrap();
+                        match stream.write(&format!("{} stars", ntry).to_string().into_bytes()) {
+                            Ok(_) => {
+                                debug!("successfully send {} stars", ntry);
+                                let mut buf = [0u8; 256];
+                                match stream.read(&mut buf[..]) {
                                     Ok(_) => {
-                                        debug!("successfully send {} stars", ntry);
-                                        let mut buf = [0u8; 256];
-                                        match stream.read(&mut buf[..]) {
-                                            Ok(_) => info!(
-                                                "on try {} we received {}",
-                                                ntry,
-                                                String::from_utf8(buf.to_vec()).unwrap()
-                                            ),
-                                            _ => {
-                                                debug!("timeout on connection {} while waiting for answer", _i);
-                                            }
-                                        };
+                                        info!("on try {} we received {}", ntry, String::from_utf8(buf.to_vec()).unwrap())
                                     }
                                     _ => {
-                                        panic!("error when writing to test connection {}", _i);
+                                        debug!("timeout on connection {} while waiting for answer", _i);
                                     }
-                                }
+                                };
                             }
                             _ => {
-                                panic!("test connection {}: 3-way handshake with proxy failed", _i);
+                                panic!("error when writing to test connection {}", _i);
                             }
                         }
                     }
-                });
-                thread::sleep(Duration::from_millis(48)); // roughly one event each third slot
-            }
-            thread::sleep(Duration::from_millis(3000)); // wait for clients to be started
-
-            mtx.send(MessageFrom::FetchCRecords).unwrap();
-
-            match reply_mrx.recv_timeout(Duration::from_millis(5000)) {
-                Ok(MessageTo::CRecords(_pipeline_id, Some(con_records), _)) => {
-                    assert_eq!(con_records.len(), configuration.test_size.unwrap() * CLIENT_THREADS);
-                    let mut timeouts = 0;
-                    for c in con_records.iter_0() {
-                        debug!("{}", c);
-                        if c.release_cause() == ReleaseCause::Timeout {
-                            timeouts += 1;
-                        }
+                    _ => {
+                        panic!("test connection {}: 3-way handshake with proxy failed", _i);
                     }
-                    assert_eq!(timeouts, configuration.test_size.unwrap() * CLIENT_THREADS);
-                }
-                Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
-                Err(e) => {
-                    error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
                 }
             }
+        });
+        thread::sleep(Duration::from_millis(48)); // roughly one event each third slot
+    }
+    thread::sleep(Duration::from_millis(3000)); // wait for clients to be started
 
-            mtx.send(MessageFrom::Exit).unwrap();
-            thread::sleep(Duration::from_millis(2000));
+    mtx.send(MessageFrom::FetchCRecords).unwrap();
 
-            info!("terminating ProxyEngine ...");
-            println!("\nPASSED\n");
-            std::process::exit(0);
+    match reply_mrx.recv_timeout(Duration::from_millis(5000)) {
+        Ok(MessageTo::CRecords(_pipeline_id, Some(con_records), _)) => {
+            assert_eq!(con_records.len(), configuration.test_size.unwrap() * CLIENT_THREADS);
+            let mut timeouts = 0;
+            for c in con_records.iter_0() {
+                debug!("{}", c);
+                if c.release_cause() == ReleaseCause::Timeout {
+                    timeouts += 1;
+                }
+            }
+            assert_eq!(timeouts, configuration.test_size.unwrap() * CLIENT_THREADS);
         }
-        Err(ref e) => {
-            error!("Error: {}", e);
-            std::process::exit(1);
+        Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
+        Err(e) => {
+            error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
         }
     }
+
+    mtx.send(MessageFrom::Exit).unwrap();
+    thread::sleep(Duration::from_millis(2000));
+
+    info!("terminating ProxyEngine ...");
+    println!("\nPASSED\n");
+    std::process::exit(0);
 }
