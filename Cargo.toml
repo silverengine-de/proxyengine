@@ -28,7 +28,6 @@ serde_derive = "1.0"
 eui48 = { version= ">=0.4", features=["serde"] }
 uuid = { version = ">=0.7", features = ["v4", "serde"] }
 separator =  ">= 0.3"
-#serde_json = "*"
 bincode = "*"
 
 [features]

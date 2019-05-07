@@ -75,6 +75,10 @@ pub struct TargetConfig {
     pub port: u16,
 }
 
+/// This function is called once by each scheduler running as an independent thread on each active core when the RunTime installs the pipelines.
+/// Currently it iterates through all physical ports which use the respective core and sets up the network function graph (NFG) of the proxy for that port and that core.
+/// This happens by adding Runnables to the scheduler. Each Runnable runs to completion. E.g. it takes a packet batch from an ingress queue, processes the packets
+/// following the NFG and puts the packets of the batch into egress queues. After this it returns to the scheduler.
 pub fn setup_pipes_delayed_proxy<F1, F2>(
     core: i32,
     pmd_ports: HashMap<String, Arc<PmdPort>>,

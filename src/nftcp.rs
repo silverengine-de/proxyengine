@@ -38,6 +38,10 @@ const TIMER_WHEEL_RESOLUTION_MS: u64 = 10;
 const TIMER_WHEEL_SLOTS: usize = 1002;
 const TIMER_WHEEL_SLOT_CAPACITY: usize = 2500;
 
+/// This function actually defines the network function graph (NFG) for the application (tcp proxy) for
+/// a port (@pci) and its associated kernel network port (@kni) which the current core (@core) serves.
+/// The kni port is used to utilize protocol stacks of the kernel, e.g. ARP, ICMP, etc.
+/// For this purpose Kni has been assigned one or more MAC and IP addresses. Kni may be either a native Kni or a Virtio port.
 pub fn setup_delayed_proxy<F1, F2>(
     core: i32,
     pci: CacheAligned<PortQueueTxBuffered>,
@@ -103,17 +107,16 @@ pub fn setup_delayed_proxy<F1, F2>(
         }
     }
 
-    // we need this queue for the delayed bindrequest
+    // we need this queue pair for the delayed bindrequest
     let (mut producer, consumer) = new_mpsc_queue_pair();
 
-    // setting up a a reverse message channel between this pipeline and the main program thread
+    // setting up a a reverse message channel between this pipeline and the RunTime thread
     debug!("{} setting up reverse channel", pipeline_id);
     let (remote_tx, rx) = channel::<MessageTo<ProxyRecStore>>();
     // we send the transmitter to the remote receiver of our messages
     tx.send(MessageFrom::Channel(pipeline_id.clone(), remote_tx)).unwrap();
 
-    // forwarding frames coming from KNI to PCI, if we are the kni core
-
+    // forwarding frames coming from KNI to PCI
     let forward2pci = ReceiveBatch::new(kni.clone()).send(pci.clone());
     let uuid = Uuid::new_v4();
     let name = String::from("Kni2Pci");
@@ -450,47 +453,6 @@ pub fn setup_delayed_proxy<F1, F2>(
             }
             let mut group_index = 0usize; // the index of the group to be returned, default 0: dump packet
 
-            /*
-            let header0= pdu.get_header(0).clone();
-            let mac_header = header0.as_mac().unwrap();
-            let b_private_etype = private_etype(&mac_header.etype());
-            if !b_private_etype {
-                if mac_header.dst != me.l234.mac && !mac_header.dst.is_multicast() && !mac_header.dst.is_broadcast() {
-                    debug!("{} from pci: discarding because mac unknown: {} ", thread_id, mac_header);
-                    return 0;
-                }
-                if mac_header.etype() != 0x0800 && !b_private_etype {
-                    // everything other than Ipv4 or our own packets we send to KNI, i.e. group 2
-                    return 2;
-                }
-            }
-            let header1= pdu.get_header(1).clone();
-            let ip_header = header1.as_ip().unwrap();
-            if !b_private_etype {
-                // everything other than TCP, and everything not addressed to us we send to KNI, i.e. group 2
-                if ip_header.protocol() != 6 || ip_header.dst() != pipeline_ip && ip_header.dst() != me.l234.ip {
-                    return 2;
-                }
-            }
-            let header2= pdu.get_header(2).clone();
-            let tcp_header = header2.as_tcp().unwrap();
-            let mut group_index = 0usize; // the index of the group to be returned, default 0: dump packet
-            if csum_offload {
-                pdu.set_tcp_ipv4_checksum_tx_offload();
-            }
-
-            // converting to raw pointer avoids to borrow mutably from p
-            let mut hs = HeaderState {
-                ip: ip_header,
-                mac: mac_header,
-                tcp: tcp_header,
-            };
-
-
-            if !b_private_etype && hs.tcp.dst_port() != me_clone.l234.port && hs.tcp.dst_port() < tcp_min_port {
-                return 2;
-            }
-            */
 
             //check ports
             if !b_private_etype && pdu.headers().tcp(2).dst_port() != me_clone.l234.port && pdu.headers().tcp(2).dst_port() < tcp_min_port {
