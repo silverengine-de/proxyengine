@@ -4,12 +4,12 @@ use e2d2::allocators::CacheAligned;
 use e2d2::headers::Header;
 use e2d2::interface::*;
 use e2d2::queues::{new_mpsc_queue_pair, MpscProducer};
-use e2d2::utils;
 
 #[cfg(feature = "profiling")]
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::channel;
 use std::convert::TryFrom;
+use std::arch::x86_64::_rdtsc;
 
 use uuid::Uuid;
 
@@ -228,7 +228,7 @@ pub fn setup_delayed_proxy<F1, F2>(
                 remove_tcp_options(p);
                 make_reply_packet(p, 1);
                 //generate seq number:
-                c.c_seqn = (utils::rdtsc_unsafe() << 8) as u32;
+                c.c_seqn = (unsafe { _rdtsc() } << 8) as u32;
                 p.headers_mut().tcp_mut(2).set_seq_num(c.c_seqn);
                 c.ackn_p2c = p.headers().tcp(2).ack_num();
                 prepare_checksum_and_ttl(p);
@@ -420,7 +420,7 @@ pub fn setup_delayed_proxy<F1, F2>(
 // *****  the closure starts here with processing
 
             #[cfg(feature = "profiling")]
-                let timestamp_entry = utils::rdtsc_unsafe();
+                let timestamp_entry = _rdtsc();
 
             let b_private_etype;
             {
@@ -504,7 +504,7 @@ pub fn setup_delayed_proxy<F1, F2>(
                     // check for timeouts
                     // debug!("ticks = {}", ticks);
                     if ticks % wheel_tick_reduction_factor == 0 {
-                        cm.release_timeouts(&utils::rdtsc_unsafe(), &mut wheel);
+                        cm.release_timeouts(unsafe { &_rdtsc() }, &mut wheel);
                     }
                     #[cfg(feature = "profiling")]
                         {   //save stats
@@ -512,7 +512,7 @@ pub fn setup_delayed_proxy<F1, F2>(
                             let rx_stats_now = rx_stats.stats.load(Ordering::Relaxed);
                             // only save changes
                             if rx_tx_stats.last().is_none() || tx_stats_now != rx_tx_stats.last().unwrap().2 || rx_stats_now != rx_tx_stats.last().unwrap().1 {
-                                rx_tx_stats.push((utils::rdtsc_unsafe(), rx_stats_now, tx_stats_now));
+                                rx_tx_stats.push((_rdtsc(), rx_stats_now, tx_stats_now));
                             }
                         }
                 }
@@ -526,12 +526,12 @@ pub fn setup_delayed_proxy<F1, F2>(
                         let opt_c = if tcp.syn_flag() {
                             let c = cm.get_mut_or_insert(&src_sock);
                             #[cfg(feature = "profiling")]
-                                time_adders[0].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                time_adders[0].add_diff(_rdtsc() - timestamp_entry);
                             c
                         } else {
                             let c = cm.get_mut_by_sock(&src_sock);
                             #[cfg(feature = "profiling")]
-                                time_adders[8].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                time_adders[8].add_diff(_rdtsc() - timestamp_entry);
                             c
                         };
 
@@ -564,12 +564,12 @@ pub fn setup_delayed_proxy<F1, F2>(
                                     warn!("received client SYN in state {:?}/{:?}, {:?}/{:?}, {}", old_c_state, old_s_state, c.c_states(), c.s_states(), tcp);
                                 }
                                 #[cfg(feature = "profiling")]
-                                    time_adders[2].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                    time_adders[2].add_diff(_rdtsc() - timestamp_entry);
                             } else if tcp.ack_flag() && old_c_state == TcpState::SynSent {
                                 c.c_push_state(TcpState::Established);
                                 counter_c[TcpStatistics::RecvSynAck2] += 1;
                                 #[cfg(feature = "profiling")]
-                                    time_adders[4].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                    time_adders[4].add_diff(_rdtsc() - timestamp_entry);
                             } else if tcp.fin_flag() {
                                 if old_s_state >= TcpState::FinWait1 { // server in active close, client in passive or also active close
                                     if tcp.ack_flag() && tcp.ack_num() == unsafe { c.seqn.ack_for_fin_p2c } {
@@ -669,7 +669,7 @@ pub fn setup_delayed_proxy<F1, F2>(
                                 counter_s[TcpStatistics::SentSyn] += 1;
                                 group_index = 1;
                                 #[cfg(feature = "profiling")]
-                                    time_adders[5].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                    time_adders[5].add_diff(_rdtsc() - timestamp_entry);
                             } else if old_s_state < TcpState::SynReceived || old_c_state < TcpState::Established {
                                 warn!(
                                     "{} unexpected client-side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
@@ -695,7 +695,7 @@ pub fn setup_delayed_proxy<F1, F2>(
                                 client_to_server(pdu, &mut c, &me, &servers, &f_process_payload_c_s);
                                 group_index = 1;
                                 #[cfg(feature = "profiling")]
-                                    time_adders[6].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                    time_adders[6].add_diff(_rdtsc() - timestamp_entry);
                             }
                         }
                     } else {
@@ -704,7 +704,7 @@ pub fn setup_delayed_proxy<F1, F2>(
                             //debug!("looking up state for server side port { }", tcp.dst_port());
                             let mut c = cm.get_mut_by_port(tcp.dst_port());
                             #[cfg(feature = "profiling")]
-                                time_adders[1].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                time_adders[1].add_diff(_rdtsc() - timestamp_entry);
 
                             if c.is_some() {
                                 let mut c = c.as_mut().unwrap();
@@ -726,7 +726,7 @@ pub fn setup_delayed_proxy<F1, F2>(
                                         group_index = 0;
                                     }
                                     #[cfg(feature = "profiling")]
-                                        time_adders[3].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                        time_adders[3].add_diff(_rdtsc() - timestamp_entry);
                                 } else if tcp.fin_flag() {
                                     if old_c_state >= TcpState::FinWait1 {
                                         if tcp.ack_flag() && tcp.ack_num() == c.seqn_fin_p2s.wrapping_add(1) {
@@ -803,7 +803,7 @@ pub fn setup_delayed_proxy<F1, F2>(
                                     group_index = 1;
                                     b_unexpected = false;
                                     #[cfg(feature = "profiling")]
-                                        time_adders[7].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                        time_adders[7].add_diff(_rdtsc() - timestamp_entry);
                                 }
 
                                 if b_unexpected {

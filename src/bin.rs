@@ -26,7 +26,6 @@ use std::thread;
 use std::time::Duration;
 use std::convert::From;
 use std::io::{BufWriter, Write};
-use std::error::Error;
 use std::fs::File;
 use std::mem;
 
@@ -69,7 +68,7 @@ fn write_and_evaluate_records(con_records: &mut HashMap<PipelineId, Store64<Exte
 
     // write connection records into a file:
     let file = match File::create("c_records.txt") {
-        Err(why) => panic!("couldn't create c_records.txt: {}", why.description()),
+        Err(why) => panic!("couldn't create c_records.txt: {}", why),
         Ok(file) => file,
     };
     let mut f = BufWriter::new(file);
@@ -117,6 +116,8 @@ fn write_and_evaluate_records(con_records: &mut HashMap<PipelineId, Store64<Exte
 }
 
 pub fn main() {
+    env_logger::init();
+
     let mut run_time: RunTime<Configuration, Store64<Extension>> = match RunTime::init() {
         Ok(run_time) => run_time,
         Err(err) => panic!("failed to initialize RunTime {}", err),
@@ -208,7 +209,7 @@ pub fn main() {
                     );
                 },
             ))
-            .expect("cannot install pipelines");;
+            .expect("cannot install pipelines");
     } else {
         // simple proxy
         error!("simple proxy still not implemented");

@@ -1,6 +1,6 @@
 [package]
 name = "proxyengine"
-version = "0.4.8"
+version = "0.4.9"
 authors = ["Rainer Stademann <rainer.stademann@silverengine.de>"]
 
 [lib]
@@ -13,19 +13,19 @@ path = "src/bin.rs"
 
 
 [dependencies]
-e2d2 = { version = "=1.0.3", path = "../NetBricks/framework", features = ["performance"] }
-netfcts={ version="0.2.0", path = "../netfcts" }
+e2d2 = { version = "=1.0.8", path = "../NetBricks/framework", features = ["performance"] }
+netfcts={ version="0.2.3", path = "../netfcts" }
 fnv = "*"
-log = "0.4"
-env_logger = "0.5"
+log = ">=0.4"
+env_logger = ">=0.5"
 nix = "0.10.0"
-ctrlc = { version = "~3", features = ["termination"] }
+ctrlc = { version = ">=3.1", features = ["termination"] }
 time = ">=0.1.0"
 ipnet = ">=1.0"
 toml = "~0.4"
 serde = "1.0"
-serde_derive = "1.0"
-eui48 = { version= ">=0.4", features=["serde"] }
+serde_derive = ">=1.0"
+eui48 = { git= "https://github.com/readysettech/eui48.git", version= ">=1.1", features=["serde"] , default-features= false}
 uuid = { version = ">=0.7", features = ["v4", "serde"] }
 separator =  ">= 0.3"
 bincode = "*"

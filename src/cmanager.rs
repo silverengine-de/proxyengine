@@ -5,9 +5,9 @@ use std::fmt;
 use std::mem;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::arch::x86_64::_rdtsc;
 
 use e2d2::interface::{PortQueue, L4Flow, Pdu};
-use e2d2::utils;
 
 //use uuid::Uuid;
 use netfcts::timer_wheel::TimerWheel;
@@ -49,7 +49,7 @@ impl Extension {
     fn push_state(&mut self, state: TcpState, base_stamp: u64) {
         self.s_state[self.s_state_count as usize] = state as u8;
         self.s_stamps[self.s_state_count as usize] =
-            ((utils::rdtsc_unsafe() - base_stamp) / TIME_STAMP_REDUCTION_FACTOR) as u32;
+            (( unsafe { _rdtsc() } - base_stamp) / TIME_STAMP_REDUCTION_FACTOR) as u32;
         self.s_state_count += 1;
     }
 
@@ -433,10 +433,7 @@ impl<'a> Clone for ProxyConnection<'a> {
 }
 
 pub trait Connection {
-    #[inline]
     fn s_push_state(&mut self, state: TcpState);
-
-    #[inline]
     fn c_push_state(&mut self, state: TcpState);
 }
 

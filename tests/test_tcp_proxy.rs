@@ -41,6 +41,8 @@ use netfcts::comm::{MessageFrom, MessageTo};
 
 #[test]
 fn delayed_binding_proxy() {
+    env_logger::init();
+
     // cannot directly read toml file from command line, as cargo test owns it. Thus we take a detour and read it from a file.
     const INDIRECTION_FILE: &str = "./tests/toml_file.txt";
 

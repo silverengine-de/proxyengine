@@ -16,7 +16,7 @@ case $TASK in
         executable=`cargo test $2 $3 $4 --no-run --message-format=json --test test_tcp_proxy | jq -r 'select((.profile.test == true) and (.target.name == "test_tcp_proxy")) | .filenames[]'`
         echo $executable
         echo ./tests/test_rfs_ip.toml > tests/toml_file.txt
-        sudo -E env "PATH=$PATH" $executable --nocapture
+        sudo -E env "PATH=$PATH" "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" $executable --nocapture
         ;;
     test_rfs_ip.2)
         export RUST_LOG="tcp_proxy=info,test_tcp_proxy=info,e2d2=info"
