@@ -161,7 +161,7 @@ pub fn main() {
         //no_calls +=1;
         let cdata: CData = bincode::deserialize::<CData>(c.payload_packet.as_ref().unwrap().get_payload(2))
             .expect("cannot deserialize CData");
-        //info!("cdata = {:?}", cdata);
+        //inf   o!("cdata = {:?}", cdata);
         for (i, l234) in l234data_clone.iter().enumerate() {
             if l234.port == cdata.reply_socket.port() && l234.ip == u32::from(*cdata.reply_socket.ip()) {
                 c.set_server_index(i as u8);

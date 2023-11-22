@@ -1,4 +1,6 @@
 #### ProxyEngine Overview
+#### ( Note: ProxyEngine is deprecated and replaced by the follow-up project [TcpEngine](https://github.com/rstade/TcpEngine) )
+
 
 ProxyEngine is a user-space TCP-proxy written in Rust with following properties
 * TCP pass-through
